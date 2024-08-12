@@ -119,7 +119,9 @@ class FusionMultiBasicEncoder(nn.Module):
         x = self.layer3(x)
         return x
 
-    def forward(self, x_viz, x_nir, dual_inp=False, num_layers=3):
+    def forward(
+        self, x_viz, x_nir, dual_inp=False, num_layers=3, attention_debug=False
+    ):
         x_viz = self.modal_forward(x_viz)
         x_nir = self.modal_forward(x_nir)
         x = self.fusion(x_viz, x_nir)
@@ -128,20 +130,25 @@ class FusionMultiBasicEncoder(nn.Module):
             x = x[: (x.shape[0] // 2)]
 
         outputs08 = [f(x) for f in self.outputs08]
-        if num_layers == 1:
-            return (outputs08, v) if dual_inp else (outputs08,)
-
-        y = self.layer4(x)
-        outputs16 = [f(y) for f in self.outputs16]
+        output_tupple = (outputs08,)
 
         if num_layers == 2:
-            return (outputs08, outputs16, v) if dual_inp else (outputs08, outputs16)
+            y = self.layer4(x)
+            outputs16 = [f(y) for f in self.outputs16]
+            output_tupple += (outputs16,)
 
-        z = self.layer5(y)
-        outputs32 = [f(z) for f in self.outputs32]
+        if num_layers == 3:
+            z = self.layer5(y)
+            outputs32 = [f(z) for f in self.outputs32]
+            output_tupple += (outputs32,)
 
-        return (
-            (outputs08, outputs16, outputs32, v)
-            if dual_inp
-            else (outputs08, outputs16, outputs32)
-        )
+        if dual_inp:
+            output_tupple += (v,)
+
+        if attention_debug:
+            output_tupple += (
+                x_viz,
+                x_nir,
+            )
+
+        return output_tupple

@@ -110,19 +110,33 @@ class RAFTStereoFusion(nn.Module):
         # self.context_zqr_convs.eval()
         # self.update_block.eval()
 
-    def extract_feature_map(self, inputs):
+    def extract_feature_map(self, inputs, attention_debug=False):
         image_viz_left, image_viz_right, image_nir_left, image_nir_right = inputs
         if image_nir_left.shape[1] == 1:
             image_nir_left = image_nir_left.repeat(1, 3, 1, 1)
             image_nir_right = image_nir_right.repeat(1, 3, 1, 1)
         if self.args.shared_backbone:
-            *cnet_list, x = self.cnet(
+            cnet_output = self.cnet(
                 torch.cat((image_viz_left, image_viz_right), dim=0),
                 torch.cat((image_nir_left, image_nir_right), dim=0),
                 dual_inp=True,
                 num_layers=self.args.n_gru_layers,
+                attention_debug=attention_debug,
             )
+            *cnet_list, x = cnet_output[: (self.args.n_gru_layers + 1)]
             fmap1, fmap2 = self.conv2(x).split(dim=0, split_size=x.shape[0] // 2)
+
+            if attention_debug:
+                fmap1, fmap2 = x.split(dim=0, split_size=x.shape[0] // 2)
+
+                fmap1_rgb, fmap2_rgb = cnet_output[-2].split(
+                    dim=0, split_size=x.shape[0] // 2
+                )
+                fmap1_nir, fmap2_nir = cnet_output[-1].split(
+                    dim=0, split_size=x.shape[0] // 2
+                )
+                return (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
+
         else:
             fmap1, fmap2 = self.fnet([image_viz_left, image_viz_right])
             fmap1_nir, fmap2_nir = self.fnet([image_nir_left, image_nir_right])
@@ -137,6 +151,9 @@ class RAFTStereoFusion(nn.Module):
         iters = inputs["iters"]
         flow_init = inputs["flow_init"]
         test_mode = inputs["test_mode"]
+        attention_out_mode = (
+            inputs["attention_out_mode"] if "attention_out_mode" in inputs else False
+        )
         image_viz_left = inputs["image_viz_left"]
         image_viz_right = inputs["image_viz_right"]
         image_viz_left = (2 * (image_viz_left / 255.0) - 1.0).contiguous()
@@ -155,6 +172,19 @@ class RAFTStereoFusion(nn.Module):
 
         # run the context network
         with autocast(enabled=self.args.mixed_precision):
+            if attention_out_mode:
+                (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir) = (
+                    self.extract_feature_map(
+                        [
+                            image_viz_left,
+                            image_viz_right,
+                            image_nir_left,
+                            image_nir_right,
+                        ],
+                        attention_debug=True,
+                    )
+                )
+                return (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
             fmap1, fmap2, cnet_list = self.extract_feature_map(
                 [image_viz_left, image_viz_right, image_nir_left, image_nir_right]
             )
@@ -178,6 +208,7 @@ class RAFTStereoFusion(nn.Module):
             corr_block = CorrBlockFast1D
         elif self.args.corr_implementation == "alt_cuda":  # Faster version of alt
             corr_block = AlternateCorrBlock
+
         corr_fn = corr_block(
             fmap1, fmap2, radius=self.args.corr_radius, num_levels=self.args.corr_levels
         )
