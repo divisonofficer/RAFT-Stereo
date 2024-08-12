@@ -99,15 +99,16 @@ class RAFTStereoFusion(nn.Module):
         return up_flow.reshape(N, D, factor * H, factor * W)
 
     def freeze_raft(self):
-        # self.freeze_bn()
+        self.freeze_bn()
         self.cnet.freeze_raft()
 
         if self.args.shared_backbone:
-            self.conv2.eval()
+            # self.conv2.eval()
+            pass
         else:
             self.fnet.eval()
-        self.context_zqr_convs.eval()
-        self.update_block.eval()
+        # self.context_zqr_convs.eval()
+        # self.update_block.eval()
 
     def extract_feature_map(self, inputs):
         image_viz_left, image_viz_right, image_nir_left, image_nir_right = inputs

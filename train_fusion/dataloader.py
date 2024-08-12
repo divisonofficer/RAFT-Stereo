@@ -10,11 +10,20 @@ import pfmread
 import cv2
 
 
+DRIVING_JSON = "flyingthings3d.json"
+REAL_DATA_JSON = "real_data.json"
+
+
 class StereoDataset(data.Dataset):
     RESOLUTION = (720, 540)
 
     def __init__(
-        self, folder: str, flow3d_driving_json=False, gt_depth=False, copy_of_self=False
+        self,
+        folder: str = "/bean/depth",
+        real_data_json=False,
+        flow3d_driving_json=False,
+        gt_depth=False,
+        copy_of_self=False,
     ):
         self.gt_depth = gt_depth
         self.flow3d_driving_prejson = flow3d_driving_json
@@ -23,8 +32,13 @@ class StereoDataset(data.Dataset):
 
         if flow3d_driving_json:
             self.input_list = self.flow3d_driving_json()
+        elif real_data_json:
+            with open(REAL_DATA_JSON, "r") as file:
+                self.input_list = json.load(file)
         else:
             self.input_list = self.extract_input_folder(folder)
+            with open(REAL_DATA_JSON, "w") as file:
+                json.dump(self.input_list, file)
 
         self.padder = None
 

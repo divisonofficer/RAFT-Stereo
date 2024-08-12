@@ -41,7 +41,7 @@ def train(
     padder = InputPadder((540, 720), divis_by=16)
 
     model.module.freeze_raft()  # We keep the RAFT backbone frozen
-    validation_frequency = 10000
+    validation_frequency = args.valid_steps
 
     scaler = GradScaler(enabled=args.mixed_precision)
 
@@ -81,26 +81,25 @@ def train(
             scheduler.step()
             scaler.update()
 
-        if total_steps % validation_frequency == validation_frequency - 1:
-            save_path = Path("checkpoints/%d_%s.pth" % (total_steps + 1, args.name))
-            logging.info(f"Saving file {save_path.absolute()}")
-            torch.save(model.state_dict(), save_path)
+            if (total_steps + 1) % validation_frequency == 0:
+                save_path = Path("checkpoints/%d_%s.pth" % (total_steps + 1, args.name))
+                logging.info(f"Saving file {save_path.absolute()}")
+                torch.save(model.state_dict(), save_path)
 
-            loss, results = validate_things(
-                model.module,
-                args,
-                logger,
-                valid_loader,
-                batch_loader_function,
-                loss_function,
-                padder,
-                iters=args.valid_iters,
-            )
-            logger.writer.add_scalar("valid_loss", loss, total_steps)
-            logger.write_dict(results)
+                loss, results = validate_things(
+                    model.module,
+                    args,
+                    logger,
+                    valid_loader,
+                    batch_loader_function,
+                    loss_function,
+                    padder,
+                )
+                logger.writer.add_scalar("valid_loss", loss, total_steps)
+                logger.write_dict(results)
 
-            model.train()
-            model.module.freeze_bn()
+                model.train()
+                model.module.freeze_raft()
 
             total_steps += 1
 
@@ -108,11 +107,11 @@ def train(
                 should_keep_training = False
                 break
 
-        save_path = Path(
-            "checkpoints/%d_epoch_%s.pth.gz" % (total_steps + 1, args.name)
-        )
-        logging.info(f"Saving file {save_path}")
-        torch.save(model.state_dict(), save_path)
+        # save_path = Path(
+        #     "checkpoints/%d_epoch_%s.pth.gz" % (total_steps + 1, args.name)
+        # )
+        # logging.info(f"Saving file {save_path}")
+        # torch.save(model.state_dict(), save_path)
 
     print("FINISHED TRAINING")
     logger.close()
@@ -130,15 +129,16 @@ def validate_things(
     batch_loader_function,
     loss_function,
     padder,
-    iters=12,
 ):
     model.eval()
     metrics = {}
     losses = []
     for i_batch, input_valid in enumerate(valid_loader):
-        batch_load, input_arr = batch_loader_function(args, input_valid, padder)
+        batch_load, input_arr = batch_loader_function(
+            args, input_valid, padder, valid_mode=True
+        )
         flow_predictions = model(batch_load)
-        loss, metric = loss_function(model.module, input_arr, flow_predictions)
+        loss, metric = loss_function(model, input_arr, flow_predictions)
 
         print(f"Batch {i_batch} Loss {loss}")
         for k, v in metric.items():
@@ -154,7 +154,7 @@ def validate_things(
     return loss, metrics
 
 
-def self_supervised_real_batch(args, input, padder):
+def self_supervised_real_batch(args, input, padder, valid_mod=False):
     """
     Batch Load function for real input data
     """
@@ -165,14 +165,14 @@ def self_supervised_real_batch(args, input, padder):
         "image_viz_right": image2,
         "image_nir_left": image3,
         "image_nir_right": image4,
-        "iters": args.train_iters,
+        "iters": args.train_iters if not valid_mod else args.valid_iters,
         "test_mode": False,
         "flow_init": None,
         "heuristic_nir": False,
     }, [image1, image2, image3, image4]
 
 
-def flow_gt_batch(args, input, padder):
+def flow_gt_batch(args, input, padder, valid_mode=False):
     """
     Batch Load function for real input data
     """
@@ -186,7 +186,7 @@ def flow_gt_batch(args, input, padder):
         "image_viz_right": image2,
         "image_nir_left": image3,
         "image_nir_right": image4,
-        "iters": args.train_iters,
+        "iters": args.train_iters if not valid_mode else args.valid_iters,
         "test_mode": False,
         "flow_init": None,
         "heuristic_nir": False,

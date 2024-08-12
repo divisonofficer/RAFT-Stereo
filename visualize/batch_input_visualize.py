@@ -1,10 +1,11 @@
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
 
 
 def batch_input_visualize(input_batch, output_batch=None, disparity_max=64):
-
+    norm = Normalize(vmin=0, vmax=disparity_max)
     image0, image1, image2, image3, dis_batch_1, dis_batch_2 = [
         x.cuda() for x in input_batch[1:]
     ]
@@ -78,9 +79,13 @@ def batch_input_visualize(input_batch, output_batch=None, disparity_max=64):
                 axis=1,
             )
         # image_disparity_single = inputs[0][0][0].replace("left","disparity_color")
-
-        axs[i].imshow(plot_input)  # 각 subplot에 이미지 출력
-        axs[i].axis("off")  # 축 제거
+        im = axs[i].imshow(
+            plot_input, cmap="magma", norm=norm
+        )  # 각 subplot에 이미지 출력
+        # Adding the colorbar for each subplot
+        cbar = fig.colorbar(
+            im, ax=axs[i], orientation="vertical", fraction=0.02, pad=0.04
+        )
 
     plt.tight_layout()
     plt.show()
