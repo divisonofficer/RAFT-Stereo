@@ -90,13 +90,13 @@ class FusionMultiBasicEncoder(nn.Module):
             self.layer1,
             self.layer2,
             self.layer3,
-            self.layer4,
-            self.layer5,
             self.norm1,
             self.conv1,
-            self.outputs08,
-            self.outputs16,
-            self.outputs32,
+            # self.layer4,
+            # self.layer5,
+            # self.outputs08,
+            # self.outputs16,
+            # self.outputs32,
         ]:
             for param in layer.parameters():
                 param.requires_grad = False

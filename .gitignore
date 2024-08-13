@@ -7,3 +7,4 @@ sampler/dist/*
 sampler/corr_sampler.egg-info/*
 demo_output/*
 *.pub
+checkpoints/*

@@ -11,7 +11,9 @@ class FusionArgs:
         self._n_gru_layers = 2
         self._shared_backbone = True
         self._mixed_precision = True
-        self._corr_implementation = "reg_cuda"
+        self._corr_implementation: Literal["reg_cuda", "reg", "alt", "alt_cuda"] = (
+            "reg_cuda"
+        )
         self._slow_fast_gru = False
         self._restore_ckpt = "models/raftstereo-realtime.pth"
         self._lr = 0.001
@@ -102,7 +104,7 @@ class FusionArgs:
         return self._corr_implementation
 
     @corr_implementation.setter
-    def corr_implementation(self, value):
+    def corr_implementation(self, value: Literal["reg_cuda", "reg", "alt", "alt_cuda"]):
         self._corr_implementation = value
 
     @property

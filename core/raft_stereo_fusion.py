@@ -1,3 +1,4 @@
+from typing import List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,6 +13,8 @@ from core.corr import (
     AlternateCorrBlock,
 )
 from core.utils.utils import coords_grid, upflow8
+from datastructure.train_input import TrainInput
+from fusion_args import FusionArgs
 
 autocast = torch.cuda.amp.autocast
 
@@ -19,7 +22,7 @@ from core.fusion import AttentionFeatureFusion, ConcatFusion
 
 
 class RAFTStereoFusion(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args: FusionArgs):
         super().__init__()
         self.args = args
 
@@ -29,7 +32,7 @@ class RAFTStereoFusion(nn.Module):
             output_dim=[args.hidden_dims, context_dims],
             norm_fn=args.context_norm,
             downsample=args.n_downsample,
-            fusion_module=self.define_fusion_layer(),
+            fusion_module=self.define_fusion_layer(),  # type: ignore
         )
         self.update_block = BasicMultiUpdateBlock(
             self.args, hidden_dims=args.hidden_dims
@@ -59,6 +62,7 @@ class RAFTStereoFusion(nn.Module):
             return AttentionFeatureFusion
         if self.args.fusion == "ConCat":
             return ConcatFusion
+        return AttentionFeatureFusion
 
     def freeze_bn(self):
         for m in self.modules():
@@ -92,7 +96,7 @@ class RAFTStereoFusion(nn.Module):
         mask = mask.view(N, 1, 9, factor, factor, H, W)
         mask = torch.softmax(mask, dim=2)
 
-        up_flow = F.unfold(factor * flow, [3, 3], padding=1)
+        up_flow = F.unfold(factor * flow, (3, 3), padding=1)
         up_flow = up_flow.view(N, D, 9, 1, 1, H, W)
 
         up_flow = torch.sum(mask * up_flow, dim=2)
@@ -146,27 +150,19 @@ class RAFTStereoFusion(nn.Module):
             cnet_list = self.cnet(image_viz_left, image_nir_left)
         return fmap1, fmap2, cnet_list
 
-    def forward(self, inputs):
-        """Estimate optical flow between pair of frames"""
-
-        iters = inputs["iters"]
-        flow_init = inputs["flow_init"]
-        test_mode = inputs["test_mode"]
-        attention_out_mode = (
-            inputs["attention_out_mode"] if "attention_out_mode" in inputs else False
-        )
-        image_viz_left = inputs["image_viz_left"]
-        image_viz_right = inputs["image_viz_right"]
+    def batch_preprocess(self, inputs: TrainInput):
+        image_viz_left = inputs.image_viz_left
+        image_viz_right = inputs.image_viz_right
         image_viz_left = (2 * (image_viz_left / 255.0) - 1.0).contiguous()
         image_viz_right = (2 * (image_viz_right / 255.0) - 1.0).contiguous()
 
-        heuristic_nir = inputs["heuristic_nir"]
+        heuristic_nir = inputs.heuristic_nir
         if heuristic_nir:
             image_nir_left = self.rgb2NIR(image_viz_left)
             image_nir_right = self.rgb2NIR(image_viz_right)
         else:
-            image_nir_left = inputs["image_nir_left"]
-            image_nir_right = inputs["image_nir_right"]
+            image_nir_left = inputs.image_nir_left
+            image_nir_right = inputs.image_nir_right
 
         h, w = image_viz_left.shape[-2:]
 
@@ -193,8 +189,24 @@ class RAFTStereoFusion(nn.Module):
                 image_nir_right,
             ]
         ]
+        return image_viz_left, image_viz_right, image_nir_left, image_nir_right
+
+    def forward(self, input_dict: dict):
+        """Estimate optical flow between pair of frames"""
+        inputs = TrainInput(input_dict)
+        iters = inputs.iters
+        flow_init = inputs.flow_init
+        test_mode = inputs.test_mode
+        attention_out_mode = inputs.attention_out_mode
+        h, w = inputs.image_viz_left.shape[-2:]
+        image_viz_left, image_viz_right, image_nir_left, image_nir_right = (
+            self.batch_preprocess(inputs)
+        )
 
         # run the context network
+        fmap1: torch.Tensor
+        fmap2: torch.Tensor
+        cnet_list: List[Tuple[torch.Tensor, torch.Tensor]]
         with autocast(enabled=self.args.mixed_precision):
             if attention_out_mode:
                 (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir) = (
@@ -211,7 +223,7 @@ class RAFTStereoFusion(nn.Module):
                 return (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
             fmap1, fmap2, cnet_list = self.extract_feature_map(
                 [image_viz_left, image_viz_right, image_nir_left, image_nir_right]
-            )
+            )  # type: ignore
 
             net_list = [torch.tanh(x[0]) for x in cnet_list]
             inp_list = [torch.relu(x[1]) for x in cnet_list]

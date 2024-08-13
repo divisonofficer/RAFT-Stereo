@@ -1,3 +1,5 @@
+from typing import Callable, Dict
+from fusion_args import FusionArgs
 from train_stereo import Logger
 from torch.cuda.amp import GradScaler
 
@@ -5,20 +7,19 @@ import logging
 from pathlib import Path
 from torch.utils.data import DataLoader
 from core.raft_stereo_fusion import RAFTStereoFusion
-from core.utils.utils import InputPadder
 import torch
 from torch import optim
 import os
-from typing import Optional
+from datastructure.train_input import TrainInput
 
 
 def train(
-    args,
+    args: FusionArgs,
     model: RAFTStereoFusion,
     train_loader: DataLoader,
     valid_loader: DataLoader,
-    tqdm,
-    batch_loader_function,
+    tqdm: Callable,
+    batch_loader_function: Callable[[FusionArgs, tuple, bool], tuple[TrainInput, list]],
     loss_function,
 ):
     os.makedirs("checkpoints", exist_ok=True)
@@ -44,7 +45,21 @@ def train(
     scaler = GradScaler(enabled=args.mixed_precision)
 
     should_keep_training = True
-    global_batch_num = 0
+
+    def backward(
+        scaler: GradScaler,
+        optimizer: optim.Optimizer,
+        scheduler: optim.lr_scheduler.OneCycleLR,
+        model,
+        loss,
+    ):
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        scaler.step(optimizer)
+        scheduler.step()
+        scaler.update()
 
     while should_keep_training:
 
@@ -55,29 +70,21 @@ def train(
             Batch Loader : for each batch from the train_loader,
             create a input dict for model
             """
-            batch_load, input_arr = batch_loader_function(args, input_train)
+            batch_load, input_arr = batch_loader_function(args, input_train, False)
             flow_predictions = model(batch_load)
             assert model.training
             """
             Inputarr for loss function
             """
             loss, metric = loss_function(model.module, input_arr, flow_predictions)
-            logger.writer.add_scalar("live_loss", loss.item(), global_batch_num)
+            logger.writer.add_scalar("live_loss", loss.item(), total_steps)
             logger.writer.add_scalar(
-                f"learning_rate", optimizer.param_groups[0]["lr"], global_batch_num
+                f"learning_rate", optimizer.param_groups[0]["lr"], total_steps
             )
             logger.write_dict(metric)
-            logger.total_steps += 1
-            global_batch_num += 1
+
             print(f"Batch {i_batch} Loss {loss}")
-            scaler.scale(loss).backward()
-
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-            scaler.step(optimizer)
-            scheduler.step()
-            scaler.update()
+            backward(scaler, optimizer, scheduler, model, loss)
 
             if (total_steps + 1) % validation_frequency == 0:
                 save_path = Path("checkpoints/%d_%s.pth" % (total_steps + 1, args.name))
@@ -98,17 +105,12 @@ def train(
                 model.train()
                 model.module.freeze_raft()
 
+                if total_steps > args.num_steps:
+                    should_keep_training = False
+                    break
+
             total_steps += 1
-
-            if total_steps > args.num_steps:
-                should_keep_training = False
-                break
-
-        # save_path = Path(
-        #     "checkpoints/%d_epoch_%s.pth.gz" % (total_steps + 1, args.name)
-        # )
-        # logging.info(f"Saving file {save_path}")
-        # torch.save(model.state_dict(), save_path)
+            logger.total_steps = total_steps
 
     print("FINISHED TRAINING")
     logger.close()
@@ -120,47 +122,36 @@ def train(
 
 def validate_things(
     model,
-    args,
+    args: FusionArgs,
     logger,
-    valid_loader,
-    batch_loader_function,
+    valid_loader: DataLoader,
+    batch_loader_function: Callable[[FusionArgs, tuple, bool], tuple[TrainInput, list]],
     loss_function,
 ):
     model.eval()
-    metrics = {}
+    metrics: Dict[str, torch.Tensor] = {}
     losses = []
     for i_batch, input_valid in enumerate(valid_loader):
-        batch_load, input_arr = batch_loader_function(
-            args, input_valid, valid_mode=True
-        )
+        batch_load, input_arr = batch_loader_function(args, input_valid, True)
         flow_predictions = model(batch_load)
         loss, metric = loss_function(model, input_arr, flow_predictions)
 
         print(f"Batch {i_batch} Loss {loss}")
         for k, v in metric.items():
             if k not in metrics:
-                metrics[k] = []
-            metrics[k].append(v)
+                metrics[k] = torch.tensor(0.0)
+            metrics[k] += v / len(valid_loader)
         losses.append(loss.item())
 
-    for k, v in metrics.items():
-        metrics[k] = sum(v) / len(v)
     loss = sum(losses) / len(losses)
 
     return loss, metrics
 
 
 def batch_input_dict(args, input_tuple, valid_mode=False):
-    return {
-        "image_viz_left": input_tuple[0],
-        "image_viz_right": input_tuple[1],
-        "image_nir_left": input_tuple[2],
-        "image_nir_right": input_tuple[3],
-        "iters": args.train_iters if not valid_mode else args.valid_iters,
-        "test_mode": False,
-        "flow_init": None,
-        "heuristic_nir": False,
-    }
+    input = TrainInput.from_image_tuple(input_tuple[:4])
+    input.iters = args.train_iters if not valid_mode else args.valid_iters
+    return input.data_dict
 
 
 def self_supervised_real_batch(args, input, valid_mode=False):
@@ -168,13 +159,8 @@ def self_supervised_real_batch(args, input, valid_mode=False):
     Batch Load function for real input data
     """
     image_list, *blob = input
-    image1, image2, image3, image4 = [img.cuda() for img in blob]
-    return batch_input_dict(args, (image1, image2, image3, image4), valid_mode), [
-        image1,
-        image2,
-        image3,
-        image4,
-    ]
+    img_cuda = [img.cuda() for img in blob]
+    return batch_input_dict(args, img_cuda, valid_mode), img_cuda
 
 
 def flow_gt_batch(args, input, valid_mode=False):
@@ -182,5 +168,5 @@ def flow_gt_batch(args, input, valid_mode=False):
     Batch Load function for real input data
     """
     image_list, *blob = input
-    image1, image2, image3, image4, gt, _ = [img.cuda() for img in blob]
-    return batch_input_dict(args, (image1, image2, image3, image4), valid_mode), [gt]
+    img_cuda = [img.cuda() for img in blob]
+    return batch_input_dict(args, img_cuda[:4], valid_mode), [img_cuda[4]]

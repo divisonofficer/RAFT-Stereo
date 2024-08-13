@@ -77,8 +77,8 @@ def warp_reproject_loss(
     """Loss function defined over sequence of flow predictions"""
     flow_loss = 0.0
     preds_cnt = len(flow_preds)
-    img_left = img_left / 127.5 - 1.0
-    img_right = img_right / 127.5 - 1.0
+    img_left = img_left / 255.0
+    img_right = img_right / 255.0
     # Apply ReLU to ensure disparity is non-negative
     for i, flow_pred in enumerate(flow_preds):
         reproject = reproject_disparity(flow_pred, img_left)
@@ -143,7 +143,7 @@ def self_supervised_loss(model: RAFTStereoFusion, input, flow):
     loss += loss2
     viz_smooth = disparity_smoothness(flow, image_viz_left)
     nir_smooth = disparity_smoothness(flow, image_nir_left)
-    # loss += viz_smooth + nir_smooth
+    loss += viz_smooth + nir_smooth
     metric["viz_smooth"] = viz_smooth.item()
     metric["nir_smooth"] = nir_smooth.item()
 
