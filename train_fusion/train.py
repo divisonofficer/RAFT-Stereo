@@ -17,6 +17,7 @@ def train(
     model: RAFTStereoFusion,
     train_loader: DataLoader,
     valid_loader: DataLoader,
+    padder: InputPadder,
     tqdm,
     batch_loader_function,
     loss_function,
@@ -37,8 +38,6 @@ def train(
 
     total_steps = 0
     logger = Logger(model, scheduler)
-
-    padder = InputPadder((540, 720), divis_by=16)
 
     model.module.freeze_raft()  # We keep the RAFT backbone frozen
     validation_frequency = args.valid_steps
@@ -154,22 +153,31 @@ def validate_things(
     return loss, metrics
 
 
-def self_supervised_real_batch(args, input, padder, valid_mod=False):
+def batch_input_dict(args, input_tuple, valid_mode=False):
+    return {
+        "image_viz_left": input_tuple[0],
+        "image_viz_right": input_tuple[1],
+        "image_nir_left": input_tuple[2],
+        "image_nir_right": input_tuple[3],
+        "iters": args.train_iters if not valid_mode else args.valid_iters,
+        "test_mode": False,
+        "flow_init": None,
+        "heuristic_nir": False,
+    }
+
+
+def self_supervised_real_batch(args, input, padder, valid_mode=False):
     """
     Batch Load function for real input data
     """
     (image_list, *data_blob) = input
     image1, image2, image3, image4 = padder.pad(*[x.cuda() for x in data_blob[:4]])
-    return {
-        "image_viz_left": image1,
-        "image_viz_right": image2,
-        "image_nir_left": image3,
-        "image_nir_right": image4,
-        "iters": args.train_iters if not valid_mod else args.valid_iters,
-        "test_mode": False,
-        "flow_init": None,
-        "heuristic_nir": False,
-    }, [image1, image2, image3, image4]
+    return batch_input_dict(args, (image1, image2, image3, image4), valid_mode), [
+        image1,
+        image2,
+        image3,
+        image4,
+    ]
 
 
 def flow_gt_batch(args, input, padder, valid_mode=False):
@@ -180,14 +188,4 @@ def flow_gt_batch(args, input, padder, valid_mode=False):
     image1, image2, image3, image4, gt, gt_r = padder.pad(
         *[x.cuda() for x in data_blob[:6]]
     )
-
-    return {
-        "image_viz_left": image1,
-        "image_viz_right": image2,
-        "image_nir_left": image3,
-        "image_nir_right": image4,
-        "iters": args.train_iters if not valid_mode else args.valid_iters,
-        "test_mode": False,
-        "flow_init": None,
-        "heuristic_nir": False,
-    }, [gt]
+    return batch_input_dict(args, (image1, image2, image3, image4), valid_mode), [gt]

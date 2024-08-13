@@ -12,35 +12,41 @@ import cv2
 
 DRIVING_JSON = "flyingthings3d.json"
 REAL_DATA_JSON = "real_data.json"
+FLYING_JSON = "Flow3dFlyingThings3d.json"
 
 
 class StereoDataset(data.Dataset):
-    RESOLUTION = (720, 540)
-
     def __init__(
         self,
         folder: str = "/bean/depth",
         real_data_json=False,
+        real_data_validate=False,
         flow3d_driving_json=False,
+        flying3d_json=False,
         gt_depth=False,
         copy_of_self=False,
+        validate_json=False,
     ):
         self.gt_depth = gt_depth
         self.flow3d_driving_prejson = flow3d_driving_json
         if copy_of_self:
             return
-
+        self.input_list = []
         if flow3d_driving_json:
-            self.input_list = self.flow3d_driving_json()
-        elif real_data_json:
+            self.input_list += self.flow3d_driving_json(DRIVING_JSON, validate_json)
+        if flying3d_json:
+            self.input_list += self.flow3d_driving_json(FLYING_JSON, validate_json)
+        if real_data_json:
             with open(REAL_DATA_JSON, "r") as file:
                 self.input_list = json.load(file)
-        else:
+        if real_data_validate:
             self.input_list = self.extract_input_folder(folder)
             with open(REAL_DATA_JSON, "w") as file:
                 json.dump(self.input_list, file)
 
-        self.padder = None
+    def input_resolution(self):
+        image = cv2.imread(self.input_list[0][0][0])
+        return image.shape[:2]
 
     def __to_tensor(self, filename, reduce_luminance=False):
         if filename.endswith(".pfm"):
@@ -49,12 +55,12 @@ class StereoDataset(data.Dataset):
             img = np.array(Image.open(filename)).astype(np.uint8)
             if reduce_luminance:
                 img = self.darker_image(img)
-        if img.shape[0] != self.RESOLUTION[1]:
-            w_f = int(img.shape[1] / 2 - self.RESOLUTION[0] / 2)
-            h_f = int(img.shape[0] / 2 - self.RESOLUTION[1] / 2)
-            w_t = int(img.shape[1] / 2 + self.RESOLUTION[0] / 2)
-            h_t = int(img.shape[0] / 2 + self.RESOLUTION[1] / 2)
-            img = img[h_f:h_t, w_f:w_t]
+        # if img.shape[0] != self.RESOLUTION[1]:
+        #     w_f = int(img.shape[1] / 2 - self.RESOLUTION[0] / 2)
+        #     h_f = int(img.shape[0] / 2 - self.RESOLUTION[1] / 2)
+        #     w_t = int(img.shape[1] / 2 + self.RESOLUTION[0] / 2)
+        #     h_t = int(img.shape[0] / 2 + self.RESOLUTION[1] / 2)
+        #     img = img[h_f:h_t, w_f:w_t]
 
         tensor = torch.from_numpy(img.copy())
         if tensor.dim() == 2:
@@ -80,11 +86,14 @@ class StereoDataset(data.Dataset):
         night_image = cv2.convertScaleAbs(darkened_image, alpha=alpha, beta=beta)
         return night_image
 
-    def flow3d_driving_json(self):
-        with open("flyingthings3d.json", "r") as file:
+    def flow3d_driving_json(self, filename, validate=False):
+        with open(filename, "r") as file:
             entries = json.load(file)
         self.entries = []
+        validate_entries = []
+
         for entry in entries:
+
             nir = (
                 entry["rgb"][0].replace("frames_cleanpass", "nir_rendered"),
                 entry["rgb"][1].replace("frames_cleanpass", "nir_rendered"),
@@ -93,11 +102,19 @@ class StereoDataset(data.Dataset):
                 entry["rgb"][0].replace("frames_cleanpass", "nir_ambient"),
                 entry["rgb"][1].replace("frames_cleanpass", "nir_ambient"),
             )
+            if validate:
+                if not os.path.exists(nir[0]) or not os.path.exists(nir[1]):
+                    continue
+                validate_entries.append(entry)
 
             self.entries.append((entry["rgb"], nir, entry["disparity"], False))
             self.entries.append((entry["rgb"], nir_ambient, entry["disparity"], False))
             self.entries.append((entry["rgb"], nir, entry["disparity"], True))
             self.entries.append((entry["rgb"], nir_ambient, entry["disparity"], True))
+
+        if validate:
+            with open("validate.json", "w") as file:
+                json.dump(validate_entries, file)
         return self.entries
 
     def __getitem__(self, index):

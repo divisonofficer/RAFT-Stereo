@@ -46,8 +46,6 @@ def batch_input_visualize(input_batch, output_batch=None, disparity_max=64):
 
             print(disparity.min(), disparity.max(), np.median(disparity))
 
-            disparity_max = 64
-
             disparity = np.clip(disparity, 0, disparity_max)
 
             disparity_color = cv2.applyColorMap(
