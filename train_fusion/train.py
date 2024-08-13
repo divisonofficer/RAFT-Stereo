@@ -17,7 +17,6 @@ def train(
     model: RAFTStereoFusion,
     train_loader: DataLoader,
     valid_loader: DataLoader,
-    padder: InputPadder,
     tqdm,
     batch_loader_function,
     loss_function,
@@ -56,7 +55,7 @@ def train(
             Batch Loader : for each batch from the train_loader,
             create a input dict for model
             """
-            batch_load, input_arr = batch_loader_function(args, input_train, padder)
+            batch_load, input_arr = batch_loader_function(args, input_train)
             flow_predictions = model(batch_load)
             assert model.training
             """
@@ -92,7 +91,6 @@ def train(
                     valid_loader,
                     batch_loader_function,
                     loss_function,
-                    padder,
                 )
                 logger.writer.add_scalar("valid_loss", loss, total_steps)
                 logger.write_dict(results)
@@ -127,14 +125,13 @@ def validate_things(
     valid_loader,
     batch_loader_function,
     loss_function,
-    padder,
 ):
     model.eval()
     metrics = {}
     losses = []
     for i_batch, input_valid in enumerate(valid_loader):
         batch_load, input_arr = batch_loader_function(
-            args, input_valid, padder, valid_mode=True
+            args, input_valid, valid_mode=True
         )
         flow_predictions = model(batch_load)
         loss, metric = loss_function(model, input_arr, flow_predictions)
@@ -166,12 +163,12 @@ def batch_input_dict(args, input_tuple, valid_mode=False):
     }
 
 
-def self_supervised_real_batch(args, input, padder, valid_mode=False):
+def self_supervised_real_batch(args, input, valid_mode=False):
     """
     Batch Load function for real input data
     """
-    (image_list, *data_blob) = input
-    image1, image2, image3, image4 = padder.pad(*[x.cuda() for x in data_blob[:4]])
+    image_list, *blob = input
+    image1, image2, image3, image4 = [img.cuda() for img in blob]
     return batch_input_dict(args, (image1, image2, image3, image4), valid_mode), [
         image1,
         image2,
@@ -180,12 +177,10 @@ def self_supervised_real_batch(args, input, padder, valid_mode=False):
     ]
 
 
-def flow_gt_batch(args, input, padder, valid_mode=False):
+def flow_gt_batch(args, input, valid_mode=False):
     """
     Batch Load function for real input data
     """
-    (image_list, *data_blob) = input
-    image1, image2, image3, image4, gt, gt_r = padder.pad(
-        *[x.cuda() for x in data_blob[:6]]
-    )
+    image_list, *blob = input
+    image1, image2, image3, image4, gt, _ = [img.cuda() for img in blob]
     return batch_input_dict(args, (image1, image2, image3, image4), valid_mode), [gt]

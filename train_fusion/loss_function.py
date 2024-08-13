@@ -71,19 +71,21 @@ def warp_reproject_loss(
     flow_preds: torch.Tensor,
     img_left: torch.Tensor,
     img_right: torch.Tensor,
-    loss_gamma=0.08,
-    loss_beta=0.7,
+    loss_gamma=0.85,
+    loss_beta=0.9,
 ):
     """Loss function defined over sequence of flow predictions"""
     flow_loss = 0.0
     preds_cnt = len(flow_preds)
+    img_left = img_left / 127.5 - 1.0
+    img_right = img_right / 127.5 - 1.0
     # Apply ReLU to ensure disparity is non-negative
     for i, flow_pred in enumerate(flow_preds):
         reproject = reproject_disparity(flow_pred, img_left)
         # Compute the main loss
         ssim_loss = 1 - ssim(reproject, img_right, channel=img_right.shape[1])
         l1_loss = F.l1_loss(reproject, img_right)
-        flow_loss += (ssim_loss + loss_gamma * l1_loss) * (
+        flow_loss += ((1 - loss_gamma) * ssim_loss + loss_gamma * l1_loss) * (
             loss_beta ** (preds_cnt - i - 1)
         )
 

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.transforms.functional import pad
 from core.update import BasicMultiUpdateBlock
 from core.extractor import BasicEncoder, MultiBasicEncoder, ResidualBlock
 from core.extractor_fusion import FusionMultiBasicEncoder
@@ -64,7 +65,7 @@ class RAFTStereoFusion(nn.Module):
             if isinstance(m, nn.BatchNorm2d):
                 m.eval()
 
-    def rgb2NIR(rgb):
+    def rgb2NIR(self, rgb):
         # Reverse the channels and use torch.maximum
         interm = torch.maximum(rgb, 1 - rgb)[..., ::-1]
 
@@ -167,8 +168,31 @@ class RAFTStereoFusion(nn.Module):
             image_nir_left = inputs["image_nir_left"]
             image_nir_right = inputs["image_nir_right"]
 
+        h, w = image_viz_left.shape[-2:]
+
+        h_32 = (h + 31) // 32 * 32
+        w_32 = (w + 31) // 32 * 32
+
         image_nir_left = (2 * (image_nir_left / 255.0) - 1.0).contiguous()
         image_nir_right = (2 * (image_nir_right / 255.0) - 1.0).contiguous()
+
+        image_viz_left, image_viz_right, image_nir_left, image_nir_right = [
+            pad(
+                img,
+                [
+                    0,
+                    0,
+                    w_32 - img.size(-1),
+                    h_32 - img.size(-2),
+                ],
+            )
+            for img in [
+                image_viz_left,
+                image_viz_right,
+                image_nir_left,
+                image_nir_right,
+            ]
+        ]
 
         # run the context network
         with autocast(enabled=self.args.mixed_precision):
@@ -276,6 +300,7 @@ class RAFTStereoFusion(nn.Module):
             flow_predictions.append(flow_up)
 
         if test_mode:
-            return coords1 - coords0, flow_up
+            return coords1 - coords0, flow_up[:, :, :h, :w]
+        flow_predictions = [flow[:, :, :h, :w] for flow in flow_predictions]
 
         return flow_predictions

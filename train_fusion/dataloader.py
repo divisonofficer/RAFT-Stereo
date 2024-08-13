@@ -1,4 +1,5 @@
 import os
+from typing import Optional, Tuple
 import torch
 import torch.utils.data as data
 import numpy as np
@@ -6,7 +7,7 @@ from core.utils.utils import InputPadder
 from PIL import Image
 import json
 import pfmread
-
+from torchvision.transforms.functional import pad
 import cv2
 
 
@@ -26,8 +27,10 @@ class StereoDataset(data.Dataset):
         gt_depth=False,
         copy_of_self=False,
         validate_json=False,
+        cut_resolution: Optional[Tuple[int, int]] = None,
     ):
         self.gt_depth = gt_depth
+        self.cut_resolution = cut_resolution
         self.flow3d_driving_prejson = flow3d_driving_json
         if copy_of_self:
             return
@@ -45,7 +48,11 @@ class StereoDataset(data.Dataset):
                 json.dump(self.input_list, file)
 
     def input_resolution(self):
-        image = cv2.imread(self.input_list[0][0][0])
+        image = cv2.imread(
+            self.input_list[0][0][0]
+            if isinstance(self.input_list[0][0], tuple)
+            else self.input_list[0][0]
+        )
         return image.shape[:2]
 
     def __to_tensor(self, filename, reduce_luminance=False):
@@ -55,12 +62,12 @@ class StereoDataset(data.Dataset):
             img = np.array(Image.open(filename)).astype(np.uint8)
             if reduce_luminance:
                 img = self.darker_image(img)
-        # if img.shape[0] != self.RESOLUTION[1]:
-        #     w_f = int(img.shape[1] / 2 - self.RESOLUTION[0] / 2)
-        #     h_f = int(img.shape[0] / 2 - self.RESOLUTION[1] / 2)
-        #     w_t = int(img.shape[1] / 2 + self.RESOLUTION[0] / 2)
-        #     h_t = int(img.shape[0] / 2 + self.RESOLUTION[1] / 2)
-        #     img = img[h_f:h_t, w_f:w_t]
+        if self.cut_resolution is not None and img.shape[0] != self.cut_resolution[0]:
+            w_f = int(img.shape[1] / 2 - self.cut_resolution[1] / 2)
+            h_f = int(img.shape[0] / 2 - self.cut_resolution[0] / 2)
+            w_t = int(img.shape[1] / 2 + self.cut_resolution[1] / 2)
+            h_t = int(img.shape[0] / 2 + self.cut_resolution[0] / 2)
+            img = img[h_f:h_t, w_f:w_t]
 
         tensor = torch.from_numpy(img.copy())
         if tensor.dim() == 2:
@@ -73,6 +80,7 @@ class StereoDataset(data.Dataset):
             copy_of_self=True,
             gt_depth=self.gt_depth,
             flow3d_driving_json=self.flow3d_driving_prejson,
+            cut_resolution=self.cut_resolution,
         )
         copy_of_self.input_list = self.input_list[start:end]
 
@@ -113,9 +121,41 @@ class StereoDataset(data.Dataset):
             self.entries.append((entry["rgb"], nir_ambient, entry["disparity"], True))
 
         if validate:
-            with open("validate.json", "w") as file:
+            with open(filename, "w") as file:
                 json.dump(validate_entries, file)
         return self.entries
+
+    def collate_fn(self, batch):
+        max_width = max([image[1].shape[-1] for image in batch])
+        max_height = max([image[1].shape[-2] for image in batch])
+        padded_images = []
+        input_arr = []
+
+        for item in batch:
+            input, *images = item
+            input_arr.append(input)
+            for idx, img in enumerate(images):
+                if len(padded_images) <= idx:
+                    padded_images.append([])
+                if img.size(-1) == max_width and img.size(-2) == max_height:
+                    padded_images[idx].append(img)
+                    continue
+                img = img.unsqueeze(0)
+                pad_img = pad(
+                    img,
+                    [
+                        0,
+                        0,
+                        max_width - img.shape[-1],
+                        max_height - img.shape[-2],
+                    ],
+                )
+
+                padded_images[idx].append(pad_img[0])
+
+        padded_images = [torch.stack(padded_image) for padded_image in padded_images]
+
+        return input_arr, *padded_images
 
     def __getitem__(self, index):
         """
@@ -141,10 +181,7 @@ class StereoDataset(data.Dataset):
             ) = self.input_list[index]
             viz_luminance_reduce = False
         disp = (
-            (
-                self.__to_tensor(dis_viz),
-                self.__to_tensor(dis_nir),
-            )
+            []
             if not self.gt_depth
             else (self.__to_tensor(dis_gt_left), self.__to_tensor(dis_gt_right))
         )
