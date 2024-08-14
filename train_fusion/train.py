@@ -77,6 +77,35 @@ def train(
             Inputarr for loss function
             """
             loss, metric = loss_function(model.module, input_arr, flow_predictions)
+
+            if args.both_side_train:
+                input_train_right = ()
+                input_train_right += (input_train[0],)
+                input_train_right += (torch.flip(input_train[2].clone(), dims=[-1]),)
+                input_train_right += (torch.flip(input_train[1].clone(), dims=[-1]),)
+                input_train_right += (torch.flip(input_train[4].clone(), dims=[-1]),)
+                input_train_right += (torch.flip(input_train[3].clone(), dims=[-1]),)
+
+                if len(input_train) > 5:
+                    input_train_right += (
+                        torch.flip(input_train[6].clone(), dims=[-1]),
+                    )
+                    input_train_right += (
+                        torch.flip(input_train[5].clone(), dims=[-1]),
+                    )
+
+                batch_load, input_arr = batch_loader_function(
+                    args, input_train_right, False
+                )
+                flow_predictions = model(batch_load)
+
+                loss_right, metric_right = loss_function(
+                    model.module, input_arr, flow_predictions
+                )
+                loss += loss_right
+                for k, v in metric_right.items():
+                    metric[f"{k}_right"] = v
+
             logger.writer.add_scalar("live_loss", loss.item(), total_steps)
             logger.writer.add_scalar(
                 f"learning_rate", optimizer.param_groups[0]["lr"], total_steps

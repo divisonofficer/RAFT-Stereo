@@ -29,6 +29,7 @@ class FusionArgs:
         self._freeze_backbone: List[
             Literal["Extractor", "Updater", "Volume", "BatchNorm"]
         ] = ["Extractor"]
+        self._both_side_train = False
 
     @property
     def hidden_dims(self):
@@ -229,3 +230,12 @@ class FusionArgs:
         self, value: List[Literal["Extractor", "Updater", "Volume", "BatchNorm"]]
     ):
         self._freeze_backbone = value
+
+    @property
+    def both_side_train(self):
+        """양쪽 이미지를 모두 사용하여 학습할지 여부를 설정합니다."""
+        return self._both_side_train
+
+    @both_side_train.setter
+    def both_side_train(self, value: bool):
+        self._both_side_train = value

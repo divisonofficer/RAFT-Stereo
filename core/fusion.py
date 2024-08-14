@@ -83,15 +83,13 @@ class MultiScaleChannelAttentionModule(nn.Module):
 
 
 class AttentionFeatureFusion(nn.Module):
-    def __init__(self, in_channels=128):
+    def __init__(self, in_channels=128, reduction=16):
         super(AttentionFeatureFusion, self).__init__()
 
-        self.attention_rgb = MultiScaleChannelAttentionModule(in_channels)
-        self.attention_nir = MultiScaleChannelAttentionModule(in_channels)
+        self.attention_rgb = MultiScaleChannelAttentionModule(in_channels, reduction)
+        self.attention_nir = MultiScaleChannelAttentionModule(in_channels, reduction)
 
-        self.sigmoid = nn.Sigmoid()
-        self.local_attention = LocalAttentionModule(in_channels)
-        self.global_attention = GlobalAttentionModule(in_channels)
+        self.attention_fusion = MultiScaleChannelAttentionModule(in_channels, reduction)
 
     def forward(self, rgb, nir):
         # Apply the attention modules to the input features
@@ -106,31 +104,18 @@ class AttentionFeatureFusion(nn.Module):
         att_features = rgb_att + nir_att
 
         # Apply the attention fusion module
-        att_fusion = self.sigmoid(
-            self.local_attention(rgb_att) + self.global_attention(att_features)
-        )
+        att_fusion = self.attention_fusion(att_features)
 
         out = att_fusion * rgb_att + (1 - att_fusion) * nir_att
-
-        out = torch.where(
-            torch.isinf(out) | torch.isnan(out), torch.tensor(0.0, dtype=out.dtype), out
-        )
 
         return out
 
 
 class ConcatFusion(nn.Module):
-    def __init__(self, in_channels=128):
+    def __init__(self, in_channels=128, reduction=16):
         super(ConcatFusion, self).__init__()
 
         self.conv1 = nn.Conv2d(in_channels * 2, in_channels, 1)
 
     def forward(self, rgb, nir):
         return self.conv1(torch.cat((rgb, nir), dim=1))
-
-
-if __name__ == "__main__":
-    from torchsummary import summary
-
-    model = AttentionFeatureFusion().cuda()
-    summary(model, [(128, 64, 64), (128, 64, 64)])
