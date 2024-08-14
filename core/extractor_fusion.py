@@ -13,32 +13,48 @@ class FusionMultiBasicEncoder(nn.Module):
         dropout=0.0,
         downsample=3,
         fusion_module=AttentionFeatureFusion,
+        shared_extractor=False,
     ):
         super(FusionMultiBasicEncoder, self).__init__()
         self.norm_fn = norm_fn
         self.downsample = downsample
+        self.shared_extractor = shared_extractor
 
         if self.norm_fn == "group":
             self.norm1 = nn.GroupNorm(num_groups=8, num_channels=64)
+            self.norm1_2 = nn.GroupNorm(num_groups=8, num_channels=64)
 
         elif self.norm_fn == "batch":
             self.norm1 = nn.BatchNorm2d(64)
+            self.norm1_2 = nn.BatchNorm2d(64)
 
         elif self.norm_fn == "instance":
             self.norm1 = nn.InstanceNorm2d(64)
+            self.norm1_2 = nn.InstanceNorm2d(64)
 
         elif self.norm_fn == "none":
             self.norm1 = nn.Sequential()
+            self.norm1_2 = nn.Sequential()
 
         self.conv1 = nn.Conv2d(
             3, 64, kernel_size=7, stride=1 + (downsample > 2), padding=3
         )
+
         self.relu1 = nn.ReLU(inplace=True)
 
         self.in_planes = 64
         self.layer1 = self._make_layer(64, stride=1)
         self.layer2 = self._make_layer(96, stride=1 + (downsample > 1))
         self.layer3 = self._make_layer(128, stride=1 + (downsample > 0))
+
+        if not shared_extractor:
+            self.conv1_2 = nn.Conv2d(
+                3, 64, kernel_size=7, stride=1 + (downsample > 2), padding=3
+            )
+            self.layer1_2 = self._make_layer(64, stride=1)
+            self.layer2_2 = self._make_layer(96, stride=1 + (downsample > 1))
+            self.layer3_2 = self._make_layer(128, stride=1 + (downsample > 0))
+
         self.layer4 = self._make_layer(128, stride=2)
         self.layer5 = self._make_layer(128, stride=2)
 
@@ -109,21 +125,29 @@ class FusionMultiBasicEncoder(nn.Module):
         self.in_planes = dim
         return nn.Sequential(*layers)
 
-    def modal_forward(self, x):
-        x = self.conv1(x)
-        x = self.norm1(x)
-        x = self.relu1(x)
+    def modal_forward(self, x, side=0):
+        if side == 0:
+            x = self.conv1(x)
+            x = self.norm1(x)
+            x = self.relu1(x)
 
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
+            x = self.layer1(x)
+            x = self.layer2(x)
+            x = self.layer3(x)
+        else:
+            x = self.conv1_2(x)
+            x = self.norm1_2(x)
+            x = self.relu1(x)
+            x = self.layer1_2(x)
+            x = self.layer2_2(x)
+            x = self.layer3_2(x)
         return x
 
     def forward(
         self, x_viz, x_nir, dual_inp=False, num_layers=3, attention_debug=False
     ):
-        x_viz = self.modal_forward(x_viz)
-        x_nir = self.modal_forward(x_nir)
+        x_viz = self.modal_forward(x_viz, 0)
+        x_nir = self.modal_forward(x_nir, 0 if self.shared_extractor else 1)
         x = self.fusion(x_viz, x_nir)
         if dual_inp:
             v = x

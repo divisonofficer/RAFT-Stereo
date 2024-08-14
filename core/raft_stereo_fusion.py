@@ -33,6 +33,7 @@ class RAFTStereoFusion(nn.Module):
             norm_fn=args.context_norm,
             downsample=args.n_downsample,
             fusion_module=self.define_fusion_layer(),  # type: ignore
+            shared_extractor=args.shared_fusion,
         )
         self.update_block = BasicMultiUpdateBlock(
             self.args, hidden_dims=args.hidden_dims
@@ -104,16 +105,21 @@ class RAFTStereoFusion(nn.Module):
         return up_flow.reshape(N, D, factor * H, factor * W)
 
     def freeze_raft(self):
-        self.freeze_bn()
-        self.cnet.freeze_raft()
+        if "BatchNorm" in self.args.freeze_backbone:
+            self.freeze_bn()
+        if "Extractor" in self.args.freeze_backbone:
+            self.cnet.freeze_raft()
 
         if self.args.shared_backbone:
-            # self.conv2.eval()
-            pass
+            if "Volume" in self.args.freeze_backbone:
+                self.conv2.eval()
         else:
-            self.fnet.eval()
-        # self.context_zqr_convs.eval()
-        # self.update_block.eval()
+            if "Extractor" in self.args.freeze_backbone:
+                self.fnet.eval()
+        if "Volume" in self.args.freeze_backbone:
+            self.context_zqr_convs.eval()
+        if "Updater" in self.args.freeze_backbone:
+            self.update_block.eval()
 
     def extract_feature_map(self, inputs, attention_debug=False):
         image_viz_left, image_viz_right, image_nir_left, image_nir_right = inputs

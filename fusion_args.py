@@ -1,4 +1,4 @@
-from typing import Union, Optional, Literal
+from typing import List, Union, Optional, Literal
 
 
 class FusionArgs:
@@ -24,7 +24,11 @@ class FusionArgs:
         self._valid_steps = 1000
         self._name = "StereoFusion"
         self._batch_size = 4
-        self._fusion = "AFF"
+        self._fusion: Literal["AFF", "ConCat"] = "AFF"
+        self._shared_fusion = False
+        self._freeze_backbone: List[
+            Literal["Extractor", "Updater", "Volume", "BatchNorm"]
+        ] = ["Extractor"]
 
     @property
     def hidden_dims(self):
@@ -205,3 +209,23 @@ class FusionArgs:
     @fusion.setter
     def fusion(self, value: Literal["AFF", "ConCat"]):
         self._fusion = value
+
+    @property
+    def shared_fusion(self):
+        """ExtractorFusion 모듈에서 fusion module을 공유할지 여부를 설정합니다."""
+        return self._shared_fusion
+
+    @shared_fusion.setter
+    def shared_fusion(self, value):
+        self._shared_fusion = value
+
+    @property
+    def freeze_backbone(self):
+        """Extractor, Updater, Volume 중 어떤 부분을 freeze할지 설정합니다."""
+        return self._freeze_backbone
+
+    @freeze_backbone.setter
+    def freeze_backbone(
+        self, value: List[Literal["Extractor", "Updater", "Volume", "BatchNorm"]]
+    ):
+        self._freeze_backbone = value
