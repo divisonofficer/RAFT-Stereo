@@ -198,8 +198,11 @@ def gt_loss(model, flow_gt, flow_preds, loss_gamma=0.9, max_flow=700):
             and not torch.isinf(flow_preds[i]).any()
         )
         # We adjust the loss_gamma so it is consistent for any number of RAFT-Stereo iterations
-        adjusted_loss_gamma = loss_gamma ** (15 / (n_predictions - 1))
-        i_weight = adjusted_loss_gamma ** (n_predictions - i - 1)
+        if n_predictions > 1:
+            adjusted_loss_gamma = loss_gamma ** (15 / (n_predictions - 1))
+            i_weight = adjusted_loss_gamma ** (n_predictions - i - 1)
+        else:
+            i_weight = 1.0
         i_loss = (flow_preds[i] - flow_gt).abs()
         flow_loss += i_weight * i_loss.mean()
 
