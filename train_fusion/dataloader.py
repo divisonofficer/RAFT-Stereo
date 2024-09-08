@@ -36,7 +36,7 @@ class Entry:
         return self
 
     def __key__(self):
-        return self.rgb[0]
+        return self.nir[0]
 
 
 class StereoDatasetArgs:
@@ -49,7 +49,9 @@ class StereoDatasetArgs:
         flying3d_json=False,
         gt_depth=False,
         synth_no_filter=False,
+        synth_no_rgb=False,
         validate_json=False,
+        
     ):
         self.folder = folder
         self.real_data_json = real_data_json
@@ -59,6 +61,7 @@ class StereoDatasetArgs:
         self.gt_depth = gt_depth
         self.synth_no_filter = synth_no_filter
         self.validate_json = validate_json
+        self.synth_no_rgb = synth_no_rgb
 
 
 class StereoDataset(data.Dataset):
@@ -135,7 +138,8 @@ class StereoDataset(data.Dataset):
                     entry["rgb"][1].replace("frames_cleanpass", "nir_rendered"),
                 )
                 entry["nir"] = nir
-            self.entries.append(Entry(entry["rgb"], nir, entry["disparity"]))
+            if not self.args.synth_no_rgb:
+                self.entries.append(Entry(entry["rgb"], nir, entry["disparity"]))
 
             for filter in [
                 "frame_burnt_filtered",

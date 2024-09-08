@@ -18,12 +18,10 @@ class LocalAttentionModule(nn.Module):
 
     def forward(self, x):
         local_branch = self.local_conv1(x)
-        if x.size(0) > 1:
-            local_branch = self.local_bn1(local_branch)
+        local_branch = self.local_bn1(local_branch)
         local_branch = self.local_relu(local_branch)
         local_branch = self.local_conv2(local_branch)
-        if x.size(0) > 1:
-            local_branch = self.local_bn2(local_branch)
+        local_branch = self.local_bn2(local_branch)
         return local_branch
 
 
@@ -54,15 +52,13 @@ class GlobalAttentionModule(nn.Module):
         # First branch
 
         global_branch = self.global_conv1(avg_pool)
-        if x.size(0) > 1:
-            global_branch = self.global_bn1(global_branch)
+        global_branch = self.global_bn1(global_branch)
 
         global_branch = self.global_relu(global_branch)
 
         global_branch = self.global_conv2(global_branch)
 
-        if x.size(0) > 1:
-            global_branch = self.global_bn2(global_branch)
+        global_branch = self.global_bn2(global_branch)
         return global_branch
 
 
@@ -77,7 +73,9 @@ class MultiScaleChannelAttentionModule(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        out = self.sigmoid(self.local_attention(x) + self.global_attention(x))
+        out = self.local_attention(x) + self.global_attention(x)
+        
+        out = self.sigmoid(out)
 
         return out
 
@@ -90,6 +88,8 @@ class AttentionFeatureFusion(nn.Module):
         self.attention_nir = MultiScaleChannelAttentionModule(in_channels, reduction)
 
         self.attention_fusion = MultiScaleChannelAttentionModule(in_channels, reduction)
+        
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, rgb, nir):
         # Apply the attention modules to the input features
@@ -97,16 +97,15 @@ class AttentionFeatureFusion(nn.Module):
         nir_att = self.attention_nir(nir)
 
         # Concatenate the attention features
-        att_add = rgb_att + nir_att
-
-        rgb_att = 2 * rgb * rgb_att / att_add
-        nir_att = 2 * nir * nir_att / att_add
-        att_features = rgb_att + nir_att
+        
+        rgb_att = rgb * rgb_att
+        nir_att = nir * nir_att
+        att_features = 2 * (rgb_att + nir_att)
 
         # Apply the attention fusion module
         att_fusion = self.attention_fusion(att_features)
 
-        out = att_fusion * rgb_att + (1 - att_fusion) * nir_att
+        out = att_fusion * rgb + (1 - att_fusion) * nir
 
         return out
 

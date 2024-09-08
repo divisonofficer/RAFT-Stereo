@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from torch.utils.data import DataLoader
 from core.raft_stereo_fusion import RAFTStereoFusion
+from core.utils.utils import InputPadder
 import torch
 from torch import optim
 import os
@@ -57,9 +58,10 @@ def train(
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-        scaler.step(optimizer)
-        scheduler.step()
-        scaler.update()
+        scaler.step(optimizer)  # optimizer를 먼저 호출
+        scaler.update()         # 스케일러 업데이트
+
+        scheduler.step()        # 이후에 scheduler를 호출
 
     while should_keep_training:
 
@@ -76,8 +78,12 @@ def train(
             """
             Inputarr for loss function
             """
-            loss, metric = loss_function(model.module, input_arr, flow_predictions)
-
+            try:
+                loss, metric = loss_function(model.module, input_arr, flow_predictions)
+            except AssertionError as e:
+                print(flow_predictions)
+                print(input_train[0])
+                raise e
             if args.both_side_train:
                 input_train_right = ()
                 input_train_right += (input_train[0],)
@@ -160,17 +166,18 @@ def validate_things(
     model.eval()
     metrics: Dict[str, torch.Tensor] = {}
     losses = []
-    for i_batch, input_valid in enumerate(valid_loader):
-        batch_load, input_arr = batch_loader_function(args, input_valid, True)
-        flow_predictions = model(batch_load)
-        loss, metric = loss_function(model, input_arr, flow_predictions)
+    with torch.no_grad():
+        for i_batch, input_valid in enumerate(valid_loader):
+            batch_load, input_arr = batch_loader_function(args, input_valid, True)
+            flow_predictions = model(batch_load)
+            loss, metric = loss_function(model, input_arr, flow_predictions)
 
-        print(f"Batch {i_batch} Loss {loss}")
-        for k, v in metric.items():
-            if k not in metrics:
-                metrics[k] = torch.tensor(0.0)
-            metrics[k] += v / len(valid_loader)
-        losses.append(loss.item())
+            print(f"Batch {i_batch} Loss {loss}")
+            for k, v in metric.items():
+                if k not in metrics:
+                    metrics[k] = torch.tensor(0.0)
+                metrics[k] += v / len(valid_loader)
+            losses.append(loss.item())
 
     loss = sum(losses) / len(losses)
 
@@ -188,7 +195,8 @@ def self_supervised_real_batch(args, input, valid_mode=False):
     Batch Load function for real input data
     """
     image_list, *blob = input
-    img_cuda = [img.cuda() for img in blob]
+    padder = InputPadder(blob[0].shape[-2:], divis_by=32)
+    img_cuda = padder.pad(*[img.cuda() for img in blob])
     return batch_input_dict(args, img_cuda, valid_mode), img_cuda
 
 
@@ -197,5 +205,6 @@ def flow_gt_batch(args, input, valid_mode=False):
     Batch Load function for real input data
     """
     image_list, *blob = input
-    img_cuda = [img.cuda() for img in blob]
+    padder = InputPadder(blob[0].shape[-2:], divis_by=32)
+    img_cuda = padder.pad(*[img.cuda() for img in blob])
     return batch_input_dict(args, img_cuda[:4], valid_mode), [img_cuda[4]]

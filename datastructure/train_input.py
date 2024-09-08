@@ -7,6 +7,7 @@ default_dict = {
     "flow_init": None,
     "heuristic_nir": False,
     "attention_out_mode": False,
+    "spectral_feature": False,
 }
 
 
@@ -103,3 +104,11 @@ class TrainInput:
     @attention_out_mode.setter
     def attention_out_mode(self, value):
         self.data_dict["attention_out_mode"] = value
+        
+    @property
+    def spectral_feature(self):
+        return self.data_dict["spectral_feature"]
+    
+    @spectral_feature.setter
+    def spectral_feature(self, value: bool):
+        self.data_dict["spectral_feature"] = value

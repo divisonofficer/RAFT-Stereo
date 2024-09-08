@@ -171,8 +171,8 @@ class FusionMultiBasicEncoder(nn.Module):
         layer_list = [
             self.encoder,
         ]
-        if not self.shared_extractor:
-            layer_list.append(self.encoder2)
+        # if not self.shared_extractor:
+        #     layer_list.append(self.encoder2)
         for layer in layer_list:
             for param in layer.parameters():
                 param.requires_grad = False
