@@ -4,28 +4,31 @@ import torch.nn.functional as F
 
 
 class RGBThermalFusionNet(nn.Module):
-    def __init__(self, iterations=3):
+    def __init__(self, iterations=3, hidden_dim=64):
         super(RGBThermalFusionNet, self).__init__()
 
         self.iterations = iterations
+        self.hidden_dim = hidden_dim
 
-        # 특징 추출기 정의
+        # 특징 추출기 정의 (채널 수를 hidden_dim으로 설정)
         self.rgb_feature_extractor = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.Conv2d(3, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(),
         )
         self.thermal_feature_extractor = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=3, padding=1),
+            nn.Conv2d(1, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(),
         )
         self.output_feature_extractor = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.Conv2d(3, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(),
         )
 
         # GRU 기반의 업데이트 모듈 정의
-        self.update_gru = ConvGRUCell(input_dim=64 * 3, hidden_dim=128, kernel_size=3)
-        self.output_conv = nn.Conv2d(128, 3, kernel_size=3, padding=1)
+        self.update_gru = ConvGRUCell(
+            input_dim=hidden_dim * 3, hidden_dim=hidden_dim, kernel_size=3
+        )
+        self.output_conv = nn.Conv2d(hidden_dim, 3, kernel_size=3, padding=1)
 
     def forward(self, rgb, thermal):
         # 초기 출력은 RGB 이미지로 설정
@@ -33,7 +36,9 @@ class RGBThermalFusionNet(nn.Module):
             current_output = rgb.clone()
             # hidden state 초기화
             batch_size, _, height, width = rgb.size()
-            hidden_state = torch.zeros(batch_size, 128, height, width).to(rgb.device)
+            hidden_state = torch.zeros(batch_size, self.hidden_dim, height, width).to(
+                rgb.device
+            )
 
             for _ in range(self.iterations):
                 # 특징 추출
