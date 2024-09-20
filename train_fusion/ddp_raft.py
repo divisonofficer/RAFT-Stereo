@@ -14,7 +14,7 @@ from fusion_args import FusionArgs
 from train_fusion.ddp import DDPTrainer
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from train_fusion.loss_function import warp_reproject_loss
+from train_fusion.loss_function import self_supervised_loss
 from train_fusion.my_h5_dataloader import MyH5DataSet
 
 
@@ -23,15 +23,25 @@ class RaftTrainer(DDPTrainer):
 
         args = FusionArgs()
         args.restore_ckpt = "models/raftstereo-realtime.pth"
-        args.batch_size = 4
+        args.batch_size = 10
         args.input_channel = 4
-        args.valid_steps = 100
+        args.valid_steps = 2000 // args.batch_size
+        args.lr = 0.0001
         args.name = "Raft4Channel"
         super().__init__(args)
 
     def init_models(self) -> Module:
         model = RAFTStereo(self.args).to(self.device)
-        return DDP(model, device_ids=[self.local_rank], output_device=self.local_rank)
+        return DDP(
+            model,
+            device_ids=[self.local_rank],
+            output_device=self.local_rank,
+            find_unused_parameters=True,
+        )
+
+    def train_mode(self):
+        self.model.train()
+        self.model.module.freeze_bn()
 
     def init_dataloader(
         self,
@@ -84,27 +94,16 @@ class RaftTrainer(DDPTrainer):
                 x[:, :, : rgb_left[0].shape[-2], : rgb_left[0].shape[-1]] for x in flow
             ]
 
-            warp_loss_rgb, warp_metric_rgb = warp_reproject_loss(
-                flow, rgb_left, rgb_right
+            warp_loss, warp_metric = self_supervised_loss(
+                (rgb_left, rgb_right, nir_left, nir_right), flow
             )
-            warp_loss_nir, warp_metric_nir = warp_reproject_loss(
-                flow, nir_left, nir_right
-            )
-
-            depth_loss = loss_fn_detph_gt(flow[-1], target_gt)
-            print(depth_loss)
-            depth_loss = depth_loss.mean()
-
-            # Ensure warp metrics are tensors
             loss_dict = {}
-            for k, v in warp_metric_rgb.items():
+            for k, v in warp_metric.items():
                 if not isinstance(v, torch.Tensor):
                     v = torch.tensor(v, device=flow[-1].device)
-                loss_dict[k] = v
-            for k, v in warp_metric_nir.items():
-                if not isinstance(v, torch.Tensor):
-                    v = torch.tensor(v, device=flow[-1].device)
-                loss_dict[f"{k}_nir"] = v
+            loss_dict[k] = v
+            depth_loss = loss_fn_detph_gt(-flow[-1], target_gt)
+            depth_loss = depth_loss.mean() / 4.0
 
             # Ensure depth_loss is a tensor
             if not isinstance(depth_loss, torch.Tensor):
@@ -112,7 +111,7 @@ class RaftTrainer(DDPTrainer):
 
             loss_dict["depth_loss"] = depth_loss
 
-            total_loss = warp_loss_rgb.mean() + warp_loss_nir.mean() + depth_loss
+            total_loss = warp_loss.mean() + depth_loss
             return total_loss, loss_dict
 
         return loss_fn

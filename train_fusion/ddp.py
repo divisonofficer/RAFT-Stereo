@@ -15,6 +15,7 @@ from torch.cuda.amp import GradScaler
 
 from fusion_args import FusionArgs
 from train_stereo import Logger
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO)
 
@@ -94,13 +95,16 @@ class DDPTrainer:
         )
         self.scaler = GradScaler(enabled=self.args.mixed_precision)
 
+    def train_mode(self):
+        self.model.train()
+
     def train(self):
         """학습 과정을 정의합니다."""
-        self.model.train()
+        self.train_mode()
 
         while self.should_keep_training:
             self.train_sampler.set_epoch(self.total_steps)
-            for i_batch, data_blob in enumerate(self.train_loader):
+            for i_batch, data_blob in enumerate(tqdm(self.train_loader)):
                 try:
                     self.optimizer.zero_grad()
                     loss, metrics = self.process_batch(data_blob)
@@ -115,7 +119,6 @@ class DDPTrainer:
 
                     if dist.get_rank() == 0:
                         self.log_metrics(loss, metrics)
-
                     self.scaler.scale(loss).backward()
                     self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
@@ -176,10 +179,11 @@ class DDPTrainer:
 
     def run_validation(self):
         """검증을 실행합니다."""
+        self.model.eval()
         val_loss, val_metrics = self.validate(self.model.module, self.valid_loader)
         self.logger.write_dict(val_metrics)
         self.logger.writer.add_scalar("valid_loss", val_loss, self.total_steps)
-        self.model.train()
+        self.train_mode()
 
     def save_final_model(self):
         """최종 모델 저장"""

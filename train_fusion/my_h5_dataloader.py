@@ -16,9 +16,11 @@ class MyH5DataSet(data.Dataset):
         root="/bean/depth",
         fast_test=False,
         frame_cache=False,
+        update_cache=False,
         id_list: Optional[List[str]] = None,
     ):
         self.frame_cache = frame_cache
+        self.update_cache = update_cache
         if id_list is not None:
             self.frame_id_list = id_list
             return
@@ -50,7 +52,7 @@ class MyH5DataSet(data.Dataset):
 
     def read_h5_file(self, h5_file):
         frame_id_ret = []
-        with h5py.File(h5_file, "a") as f:
+        with h5py.File(h5_file, "a" if self.update_cache else "r", swmr=True) as f:
             if self.frame_cache and "frame_ids" in f:
                 frame_ids = f["frame_ids"][:]
                 f.close()
@@ -64,7 +66,7 @@ class MyH5DataSet(data.Dataset):
                     frame_id_ret.append(
                         (h5_file, os.path.join(os.path.dirname(h5_file), frame_id))
                     )
-            if self.frame_cache:
+            if self.frame_cache and self.update_cache:
                 if "frame_ids" in f:
                     del f["frame_ids"]
                 f.create_dataset("frame_ids", data=frame_id_ret)
@@ -79,7 +81,12 @@ class MyH5DataSet(data.Dataset):
         tensor = tensor.permute(2, 0, 1)
 
         if tensor.shape[-2] < 540:
-            padding = (0, 720 - tensor.shape[-1], 0, 540 - tensor.shape[-2])
+            padding = (
+                (720 - tensor.shape[-1]) // 2,
+                (720 - tensor.shape[-1]) // 2,
+                (540 - tensor.shape[-2]) // 2,
+                (540 - tensor.shape[-2]) // 2,
+            )
             tensor = F.pad(tensor, padding)
 
         return tensor
@@ -89,18 +96,25 @@ class MyH5DataSet(data.Dataset):
         if type(h5_path) == bytes:
             h5_path = h5_path.decode("utf-8")
             frame_path = frame_path.decode("utf-8")
-        with h5py.File(h5_path, "r") as f:
+        with h5py.File(h5_path, "r", swmr=True) as f:
             frame = f.require_group(f"frame/{frame_path.split('/')[-1]}")
             focal_length = f["calibration"].attrs["mtx_left"][0, 0]
             baseline = np.linalg.norm(f["calibration"].attrs["T"][:])
             lidar_projected_points = frame["lidar/projected_points"][:]
-            lidar_projected_points = focal_length * baseline / lidar_projected_points
+
+            lidar_projected_points[:, 2] = (
+                focal_length * baseline / lidar_projected_points[:, 2]
+            )
             while len(lidar_projected_points) < 5000:
                 lidar_projected_points = np.concatenate(
                     [lidar_projected_points, lidar_projected_points], axis=0
                 )
             lidar_projected_points = lidar_projected_points[:5000]
         lidar_projected_points = torch.from_numpy(lidar_projected_points).float()
+        resolution = cv2.imread(os.path.join(frame_path, "rgb", "left.png")).shape
+        if resolution[0] < 540:
+            lidar_projected_points[:, 1] += (540 - resolution[0]) // 2
+            lidar_projected_points[:, 0] += (720 - resolution[1]) // 2
         rgb_left = self.imread(os.path.join(frame_path, "rgb", "left.png"))
         rgb_right = self.imread(os.path.join(frame_path, "rgb", "right.png"))
         nir_left = self.imread(os.path.join(frame_path, "nir", "left.png"), gray=True)

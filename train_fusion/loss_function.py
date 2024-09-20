@@ -107,6 +107,8 @@ def disparity_smoothness(disp, img):
     def get_disparity_smoothness(disp, img):
         disp_gradients_x, disp_gradients_y = gradient(disp)
         image_gradients_x, image_gradients_y = gradient(img)
+
+        # Ensure dimensions are consistent
         min_height = min(disp_gradients_x.shape[2], image_gradients_y.shape[2])
         min_width = min(disp_gradients_x.shape[3], image_gradients_y.shape[3])
 
@@ -114,28 +116,55 @@ def disparity_smoothness(disp, img):
         disp_gradients_y = disp_gradients_y[:, :, :min_height, :min_width]
         image_gradients_x = image_gradients_x[:, :, :min_height, :min_width]
         image_gradients_y = image_gradients_y[:, :, :min_height, :min_width]
+
+        # Add epsilon to avoid zero values causing problems
+        epsilon = 1e-6
+
+        # Avoid overflow in exp by clamping the gradients
         weights_x = torch.exp(
-            -torch.mean(torch.abs(image_gradients_x), 1, keepdim=True)
+            -torch.mean(torch.abs(image_gradients_x), 1, keepdim=True).clamp(
+                min=-50, max=50
+            )
         )
         weights_y = torch.exp(
-            -torch.mean(torch.abs(image_gradients_y), 1, keepdim=True)
+            -torch.mean(torch.abs(image_gradients_y), 1, keepdim=True).clamp(
+                min=-50, max=50
+            )
         )
-        # Adjust the gradients to have the same shape
 
+        # Calculate smoothness terms and ensure non-NaN/Inf results
         smoothness_x = disp_gradients_x * weights_x
         smoothness_y = disp_gradients_y * weights_y
 
+        # Ensure no NaN or Inf in smoothness
+        smoothness_x = torch.where(
+            torch.isnan(smoothness_x), torch.zeros_like(smoothness_x), smoothness_x
+        )
+        smoothness_y = torch.where(
+            torch.isnan(smoothness_y), torch.zeros_like(smoothness_y), smoothness_y
+        )
+        smoothness_x = torch.where(
+            torch.isinf(smoothness_x), torch.zeros_like(smoothness_x), smoothness_x
+        )
+        smoothness_y = torch.where(
+            torch.isinf(smoothness_y), torch.zeros_like(smoothness_y), smoothness_y
+        )
+
         return torch.abs(smoothness_x) + torch.abs(smoothness_y)
 
-    disp_smoothness = 0
-    weight = 1.0
+    # Initialize disparity smoothness
+    disp_smoothness = torch.Tensor([0.0]).to(disp[-1].device)
+    weight = 0.5
+
+    # Loop over disparity scales and calculate smoothness
     for scaled_disp in disp:
-        disp_smoothness += weight * get_disparity_smoothness(scaled_disp, img)
-        weight /= 2.3
+        disp_smoothness += weight * get_disparity_smoothness(scaled_disp, img).mean()
+        weight /= 2.3  # Reduce weight for each scale
+
     return disp_smoothness.mean()
 
 
-def self_supervised_loss(model: RAFTStereoFusion, input, flow):
+def self_supervised_loss(input, flow):
     image_viz_left, image_viz_right, image_nir_left, image_nir_right = input
 
     loss, metric = warp_reproject_loss(flow, image_viz_left, image_viz_right)
