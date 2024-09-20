@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import traceback
 
 
 class RGBThermalFusionNet(nn.Module):
@@ -30,16 +31,17 @@ class RGBThermalFusionNet(nn.Module):
         )
         self.output_conv = nn.Conv2d(hidden_dim, 3, kernel_size=3, padding=1)
 
-    def forward(self, rgb, thermal):
-        # 초기 출력은 RGB 이미지로 설정
+    def forward(self, inputs):
+        # inputs: [batch_size, channels, height, width], channels = 3(RGB) + 1(Thermal) = 4
+        rgb = inputs[:, :3, :, :] / 255.0  # 0~1로 정규화
+        thermal = inputs[:, 3:, :, :] / 255.0  # 0~1로 정규화
+
         with torch.cuda.amp.autocast(True):
-            current_output = rgb.clone()
-            # hidden state 초기화
+            current_output = rgb.clone()  # 초기 출력은 RGB로 설정
             batch_size, _, height, width = rgb.size()
             hidden_state = torch.zeros(batch_size, self.hidden_dim, height, width).to(
                 rgb.device
             )
-
             for _ in range(self.iterations):
                 # 특징 추출
                 rgb_features = self.rgb_feature_extractor(rgb)
@@ -55,11 +57,9 @@ class RGBThermalFusionNet(nn.Module):
                 hidden_state = self.update_gru(combined_features, hidden_state)
 
                 # 업데이트를 통한 출력 생성
-                update = self.output_conv(hidden_state)
-                current_output = current_output + update
-                current_output = torch.clamp(current_output, 0, 255)
-
-            return current_output
+                update = torch.sigmoid(self.output_conv(hidden_state))
+                current_output = current_output + update  # 또는 current_output = update
+            return current_output * 255.0  # 0~255로 스케일링하여 반환
 
 
 class ConvGRUCell(nn.Module):
