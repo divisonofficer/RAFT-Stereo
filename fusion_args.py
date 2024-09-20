@@ -14,6 +14,8 @@ class FusionArgs:
         self._corr_implementation: Literal["reg_cuda", "reg", "alt", "alt_cuda"] = (
             "reg_cuda"
         )
+
+        self._input_channel = 3
         self._slow_fast_gru = False
         self._restore_ckpt = "models/raftstereo-realtime.pth"
         self._lr = 0.001
@@ -239,3 +241,11 @@ class FusionArgs:
     @both_side_train.setter
     def both_side_train(self, value: bool):
         self._both_side_train = value
+
+    @property
+    def input_channel(self):
+        return self._input_channel
+
+    @input_channel.setter
+    def input_channel(self, value):
+        self._input_channel = value

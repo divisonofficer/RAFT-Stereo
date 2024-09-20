@@ -1,3 +1,4 @@
+from typing import List
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -68,14 +69,14 @@ def reproject_disparity(
 
 
 def warp_reproject_loss(
-    flow_preds: torch.Tensor,
+    flow_preds: List[torch.Tensor],
     img_left: torch.Tensor,
     img_right: torch.Tensor,
     loss_gamma=0.85,
     loss_beta=0.9,
 ):
     """Loss function defined over sequence of flow predictions"""
-    flow_loss = 0.0
+    flow_loss = torch.Tensor([0.0]).to(img_left.device)
     preds_cnt = len(flow_preds)
     img_left = img_left / 255.0
     img_right = img_right / 255.0
@@ -83,8 +84,10 @@ def warp_reproject_loss(
     for i, flow_pred in enumerate(flow_preds):
         reproject = reproject_disparity(flow_pred, img_left)
         # Compute the main loss
-        ssim_loss = 1 - ssim(reproject, img_right, channel=img_right.shape[1])
+
+        ssim_loss = 1 - ssim(reproject, img_right, channel=img_right.shape[1]).mean()
         l1_loss = F.l1_loss(reproject, img_right)
+
         flow_loss += ((1 - loss_gamma) * ssim_loss + loss_gamma * l1_loss) * (
             loss_beta ** (preds_cnt - i - 1)
         )
