@@ -103,7 +103,6 @@ class MyH5DataSet(data.Dataset):
             focal_length = f["calibration"].attrs["mtx_left"][0, 0]
             baseline = np.linalg.norm(f["calibration"].attrs["T"][:])
             lidar_projected_points = frame["lidar/projected_points"][:]
-
             lidar_projected_points[:, 2] = (
                 focal_length * baseline / lidar_projected_points[:, 2]
             )

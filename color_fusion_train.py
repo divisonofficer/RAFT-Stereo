@@ -32,29 +32,19 @@ def main():
     # 인자 파싱 (필요 시)
     args = FusionArgs()
     # 필요한 args 설정
-    args.hidden_dims = [128, 128, 128]
-    args.corr_levels = 4
-    args.corr_radius = 4
-    args.n_downsample = 3
-    args.context_norm = "batch"
-    args.n_gru_layers = 2
-    args.shared_backbone = True
-    args.mixed_precision = True
-    args.corr_implementation = "reg_cuda"
-    args.slow_fast_gru = False
     args.restore_ckpt = "models/raftstereo-realtime.pth"
     args.lr = 0.001
     args.train_iters = 7
     args.valid_iters = 12
-    args.wdecay = 0.0001
     args.num_steps = 100000
     args.valid_steps = 50
-    args.name = "ColorFusion"
+    args.name = "ColorChannel4"
     args.batch_size = 10
     args.fusion = "AFF"
     args.shared_fusion = True
     args.freeze_backbone = []
     args.both_side_train = False
+    args.input_channel = 4
 
     # DDP 초기화
     local_rank = int(os.environ["LOCAL_RANK"])
