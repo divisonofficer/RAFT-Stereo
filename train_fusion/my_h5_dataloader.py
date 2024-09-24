@@ -74,7 +74,9 @@ class MyH5DataSet(data.Dataset):
         return frame_id_ret
 
     def imread(self, path: str, gray=False):
-        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE if gray else cv2.IMREAD_COLOR)
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE if gray else cv2.IMREAD_ANYCOLOR)
+        if not gray:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         tensor = torch.from_numpy(img).float()
         if gray:
             tensor = tensor.unsqueeze(-1)

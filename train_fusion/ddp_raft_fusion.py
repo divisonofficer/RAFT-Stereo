@@ -9,7 +9,14 @@ sys.path.append(project_root + "/..")
 
 from torch.nn.modules import Module
 from torch.utils.data import DataLoader, DistributedSampler
-from core.raft_stereo import RAFTStereo
+
+try:
+    from core.raft_stereo_fusion import RAFTStereoFusion
+except ImportError:
+    import os
+
+    os.chdir("/RAFT-Stereo")
+    from core.raft_stereo_fusion import RAFTStereoFusion
 from fusion_args import FusionArgs
 from train_fusion.ddp import DDPTrainer
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -23,16 +30,17 @@ class RaftTrainer(DDPTrainer):
 
         args = FusionArgs()
         args.restore_ckpt = "models/raftstereo-realtime.pth"
+        # args.restore_ckpt = "checkpoints/200_RaftFusion.pth"
+
         args.batch_size = 10
-        args.input_channel = 4
         args.valid_steps = 2000 // args.batch_size
         args.lr = 0.0001
-        args.name = "Raft4Channel"
+        args.name = "RaftFusionFreezeRaft"
+        args.freeze_backbone = ["Extractor", "Updater", "Volume", "BatchNorm"]
         super().__init__(args)
 
     def init_models(self) -> Module:
-        model = RAFTStereo(self.args).to(self.device)
-
+        model = RAFTStereoFusion(self.args).to(self.device)
         model = DDP(
             model,
             device_ids=[self.local_rank],
@@ -44,7 +52,7 @@ class RaftTrainer(DDPTrainer):
 
     def train_mode(self):
         self.model.train()
-        self.model.module.freeze_bn()
+        self.model.module.freeze_raft()
 
     def init_dataloader(
         self,
@@ -122,9 +130,19 @@ class RaftTrainer(DDPTrainer):
     def process_batch(self, data_blob):
         inputs = [x.to(self.device) for x in data_blob]
         target_gt = inputs[-1]
-        input_left = torch.concat([inputs[0], inputs[2]], dim=1)
-        input_right = torch.concat([inputs[1], inputs[3]], dim=1)
-        flow = self.model(input_left, input_right)
+        flow = self.model(
+            {
+                "image_viz_left": inputs[0],
+                "image_viz_right": inputs[1],
+                "image_nir_left": inputs[2],
+                "image_nir_right": inputs[3],
+                "iters": self.args.train_iters,
+                "test_mode": False,
+                "flow_init": None,
+                "heuristic_nir": False,
+                "attention_out_mode": False,
+            }
+        )
         loss, metrics = self.loss_fn(flow, inputs[:4], target_gt)
         return loss, metrics
 
@@ -134,17 +152,25 @@ class RaftTrainer(DDPTrainer):
         losses = []
         with torch.no_grad():
             for i_batch, input_valid in enumerate(valid_loader):
-                image1, image2, image3, image4, depth = [
-                    x.to(self.device) for x in input_valid
-                ]
-
-                fused_input1 = torch.cat([image1, image3], dim=1)
-                fused_input2 = torch.cat([image2, image4], dim=1)
-                _, flow = model(fused_input1, fused_input2, test_mode=True)
+                inputs = [x.to(self.device) for x in input_valid]
+                depth = inputs[-1]
+                flow = model(
+                    {
+                        "image_viz_left": inputs[0],
+                        "image_viz_right": inputs[1],
+                        "image_nir_left": inputs[2],
+                        "image_nir_right": inputs[3],
+                        "iters": self.args.valid_iters,
+                        "test_mode": False,
+                        "flow_init": None,
+                        "heuristic_nir": False,
+                        "attention_out_mode": False,
+                    }
+                )
 
                 loss, metric = self.loss_fn(
-                    [flow],
-                    (image1, image2, image3, image4),
+                    flow,
+                    inputs[:4],
                     depth,
                 )
 
