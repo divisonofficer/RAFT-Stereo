@@ -8,6 +8,9 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
 
+from utils.hy5py import calibration_property, read_lidar
+from utils.points import project_points_on_camera, transform_point_inverse
+
 
 class MyH5DataSet(data.Dataset):
 
@@ -19,6 +22,7 @@ class MyH5DataSet(data.Dataset):
         update_cache=False,
         id_list: Optional[List[str]] = None,
     ):
+        self.transform_mtx = np.load("jai_transform.npy")
         self.frame_cache = frame_cache
         self.update_cache = update_cache
         if id_list is not None:
@@ -98,21 +102,29 @@ class MyH5DataSet(data.Dataset):
         if type(h5_path) == bytes:
             h5_path = h5_path.decode("utf-8")
             frame_path = frame_path.decode("utf-8")
+        resolution = cv2.imread(os.path.join(frame_path, "rgb", "left.png")).shape
         with h5py.File(h5_path, "r", swmr=True) as f:
             frame = f.require_group(f"frame/{frame_path.split('/')[-1]}")
-            focal_length = f["calibration"].attrs["mtx_left"][0, 0]
-            baseline = np.linalg.norm(f["calibration"].attrs["T"][:])
-            lidar_projected_points = frame["lidar/projected_points"][:]
+            focal_length, baseline, cx, cy = calibration_property(
+                f["calibration"].attrs
+            )
+
+            lidar_points = read_lidar(frame)
+            lidar_points = transform_point_inverse(lidar_points, self.transform_mtx)
+            lidar_projected_points = project_points_on_camera(
+                lidar_points, focal_length, cx, cy, resolution[1], resolution[0]
+            )
             lidar_projected_points[:, 2] = (
                 focal_length * baseline / lidar_projected_points[:, 2]
             )
-            while len(lidar_projected_points) < 5000:
+
+            while len(lidar_projected_points) < 10000:
                 lidar_projected_points = np.concatenate(
                     [lidar_projected_points, lidar_projected_points], axis=0
                 )
-            lidar_projected_points = lidar_projected_points[:5000]
+            lidar_projected_points = lidar_projected_points[:10000]
         lidar_projected_points = torch.from_numpy(lidar_projected_points).float()
-        resolution = cv2.imread(os.path.join(frame_path, "rgb", "left.png")).shape
+
         if resolution[0] < 540:
             lidar_projected_points[:, 1] += (540 - resolution[0]) // 2
             lidar_projected_points[:, 0] += (720 - resolution[1]) // 2

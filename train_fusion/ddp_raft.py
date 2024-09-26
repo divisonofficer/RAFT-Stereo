@@ -92,21 +92,22 @@ class RaftTrainer(DDPTrainer):
             inputs: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
             target_gt: torch.Tensor,
         ):
+            loss_dict = {}
             rgb_left, rgb_right, nir_left, nir_right = inputs
             flow = [
                 x[:, :, : rgb_left[0].shape[-2], : rgb_left[0].shape[-1]] for x in flow
             ]
 
-            warp_loss, warp_metric = self_supervised_loss(
-                (rgb_left, rgb_right, nir_left, nir_right), flow
-            )
-            loss_dict = {}
-            for k, v in warp_metric.items():
-                if not isinstance(v, torch.Tensor):
-                    v = torch.tensor(v, device=flow[-1].device)
-                loss_dict[k] = v
+            # warp_loss, warp_metric = self_supervised_loss(
+            #     (rgb_left, rgb_right, nir_left, nir_right), flow
+            # )
+
+            # for k, v in warp_metric.items():
+            #     if not isinstance(v, torch.Tensor):
+            #         v = torch.tensor(v, device=flow[-1].device)
+            #     loss_dict[k] = v
             depth_loss = loss_fn_detph_gt(flow[-1], target_gt)
-            depth_loss = depth_loss.mean() / 20.0
+            depth_loss = depth_loss.mean()
 
             # Ensure depth_loss is a tensor
             if not isinstance(depth_loss, torch.Tensor):
@@ -114,7 +115,7 @@ class RaftTrainer(DDPTrainer):
 
             loss_dict["depth_loss"] = depth_loss
 
-            total_loss = warp_loss.mean() + depth_loss
+            total_loss = depth_loss
             return total_loss, loss_dict
 
         return loss_fn
