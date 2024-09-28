@@ -2,7 +2,7 @@ from typing import Any, Mapping
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from core.extractor import ResidualBlock
+from core.extractor import BasicEncoder, ResidualBlock
 from core.fusion import AttentionFeatureFusion
 
 
@@ -48,6 +48,96 @@ class LinearEncoder(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         return x
+
+
+class FusionBasicEncoder(nn.Module):
+    def __init__(
+        self,
+        output_dim=128,
+        norm_fn="batch",
+        dropout=0.0,
+        downsample=3,
+        shared_extractor=False,
+    ):
+        super(FusionBasicEncoder, self).__init__()
+        self.norm_fn = norm_fn
+        self.downsample = downsample
+        self.shared_extractor = shared_extractor
+        self.encoder = BasicEncoder(output_dim, norm_fn, dropout, downsample)
+        if not shared_extractor:
+            self.encoder2 = BasicEncoder(output_dim, norm_fn, dropout, downsample)
+
+        self.fusion = AttentionFeatureFusion(output_dim, 4)
+
+    def forward(self, x_viz, x_nir):
+        is_list = isinstance(x_viz, tuple) or isinstance(x_viz, list)
+        if is_list:
+            batch_dim = x_viz[0].shape[0]
+            x_viz = torch.cat(x_viz, dim=0)
+            x_nir = torch.cat(x_nir, dim=0)
+
+        x_viz = self.encoder(x_viz)
+        x_nir = self.encoder(x_nir) if self.shared_extractor else self.encoder2(x_nir)
+        x = self.fusion(x_viz, x_nir)
+        if is_list:
+            x = x.split(split_size=batch_dim, dim=0)
+        return x
+
+    def freeze_raft(self):
+        layer_list = [
+            self.encoder,
+        ]
+        if not self.shared_extractor:
+            layer_list.append(self.encoder2)
+        for layer in layer_list:
+            for param in layer.parameters():
+                param.requires_grad = False
+            layer.eval()
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        encoder_exists = (
+            len([key for key in state_dict if "module.fnet.encoder." in key]) > 0
+        )
+        if not encoder_exists:
+            keys = list(state_dict.keys())
+            for key in keys:
+                if "module.fnet." in key:
+                    key_encoder = key.replace("module.fnet.", "module.fnet.encoder.")
+                    state_dict[key_encoder] = state_dict[key]
+                    if not self.shared_extractor:
+                        key_encoder = key.replace(
+                            "module.fnet.", "module.fnet.encoder2."
+                        )
+                        state_dict[key_encoder] = state_dict[key]
+        ret = super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+        return ret
+
+    def load_state_dict(
+        self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False
+    ):
+        ret = super().load_state_dict(state_dict, strict, assign)
+        if "encoder" not in state_dict:
+            self.encoder.load_state_dict(state_dict, strict, assign)
+            if not self.shared_extractor:
+                self.encoder2.load_state_dict(state_dict, strict, assign)
+        return ret
 
 
 class FusionMultiBasicEncoder(nn.Module):
@@ -202,7 +292,7 @@ class FusionMultiBasicEncoder(nn.Module):
         outputs08 = [f(x) for f in self.outputs08]
         output_tupple = (outputs08,)
 
-        if num_layers == 2:
+        if num_layers >= 2:
             y = self.layer4(x)
             outputs16 = [f(y) for f in self.outputs16]
             output_tupple += (outputs16,)

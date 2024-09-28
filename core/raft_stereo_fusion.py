@@ -4,8 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.transforms.functional import pad
 from core.update import BasicMultiUpdateBlock
-from core.extractor import BasicEncoder, MultiBasicEncoder, ResidualBlock
-from core.extractor_fusion import FusionMultiBasicEncoder
+from core.extractor import ResidualBlock
+from core.extractor_fusion import FusionMultiBasicEncoder, FusionBasicEncoder
 from core.corr import (
     CorrBlock1D,
     PytorchAlternateCorrBlock1D,
@@ -54,8 +54,11 @@ class RAFTStereoFusion(nn.Module):
                 nn.Conv2d(128, 256, 3, padding=1),
             )
         else:
-            self.fnet = BasicEncoder(
-                output_dim=256, norm_fn="instance", downsample=args.n_downsample
+            self.fnet = FusionBasicEncoder(
+                output_dim=256,
+                norm_fn="instance",
+                downsample=args.n_downsample,
+                shared_extractor=args.shared_fusion,
             )
 
     def define_fusion_layer(self):
@@ -115,13 +118,15 @@ class RAFTStereoFusion(nn.Module):
                 self.conv2.eval()
         else:
             if "Extractor" in self.args.freeze_backbone:
-                self.fnet.eval()
+                self.fnet.freeze_raft()
         if "Volume" in self.args.freeze_backbone:
             self.context_zqr_convs.eval()
         if "Updater" in self.args.freeze_backbone:
             self.update_block.eval()
 
-    def extract_feature_map(self, inputs, spectral_feature = False, attention_debug=False):
+    def extract_feature_map(
+        self, inputs, spectral_feature=False, attention_debug=False
+    ):
         image_viz_left, image_viz_right, image_nir_left, image_nir_right = inputs
         if image_nir_left.shape[1] == 1:
             image_nir_left = image_nir_left.repeat(1, 3, 1, 1)
@@ -148,13 +153,22 @@ class RAFTStereoFusion(nn.Module):
                 fmap1, fmap2 = x.split(dim=0, split_size=x.shape[0] // 2)
                 return (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
         else:
-            fmap1, fmap2 = self.fnet([image_viz_left, image_viz_right])
-            fmap1_nir, fmap2_nir = self.fnet([image_nir_left, image_nir_right])
-            fmap1 = self.fusion_fmap(fmap1, fmap1_nir)
-            fmap2 = self.fusion_fmap(fmap2, fmap2_nir)
-            cnet_list = self.cnet(image_viz_left, image_nir_left)
+            fmap1, fmap2 = self.fnet(
+                [image_viz_left, image_viz_right], [image_nir_left, image_nir_right]
+            )
+
+            cnet_list = self.cnet(
+                torch.cat((image_viz_left, image_viz_right), dim=0),
+                torch.cat((image_nir_left, image_nir_right), dim=0),
+            )
         if spectral_feature:
-            fmap1, fmap2, cnet_list, (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
+            return (
+                fmap1,
+                fmap2,
+                cnet_list,
+                (fmap1_rgb, fmap2_rgb),
+                (fmap1_nir, fmap2_nir),
+            )
         return fmap1, fmap2, cnet_list
 
     def batch_preprocess(self, inputs: TrainInput):
@@ -167,12 +181,12 @@ class RAFTStereoFusion(nn.Module):
         else:
             image_nir_left = inputs.image_nir_left
             image_nir_right = inputs.image_nir_right
-            
+
         image_viz_left = (2 * (image_viz_left / 255.0) - 1.0).contiguous()
         image_viz_right = (2 * (image_viz_right / 255.0) - 1.0).contiguous()
         image_nir_left = (2 * (image_nir_left / 255.0) - 1.0).contiguous()
         image_nir_right = (2 * (image_nir_right / 255.0) - 1.0).contiguous()
-        
+
         return image_viz_left, image_viz_right, image_nir_left, image_nir_right
 
     def forward(self, input_dict: dict):
@@ -205,7 +219,13 @@ class RAFTStereoFusion(nn.Module):
                 )
                 return (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
             if inputs.spectral_feature:
-                fmap1, fmap2, cnet_list, (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir) = self.extract_feature_map(
+                (
+                    fmap1,
+                    fmap2,
+                    cnet_list,
+                    (fmap1_rgb, fmap2_rgb),
+                    (fmap1_nir, fmap2_nir),
+                ) = self.extract_feature_map(
                     [image_viz_left, image_viz_right, image_nir_left, image_nir_right]
                 )  # type: ignore
             fmap1, fmap2, cnet_list = self.extract_feature_map(
@@ -235,13 +255,19 @@ class RAFTStereoFusion(nn.Module):
         corr_fn = corr_block(
             fmap1, fmap2, radius=self.args.corr_radius, num_levels=self.args.corr_levels
         )
-        
+
         if inputs.spectral_feature:
             corr_fn_rgb = corr_block(
-                fmap1_rgb, fmap2, radius=self.args.corr_radius, num_levels=self.args.corr_levels
+                fmap1_rgb,
+                fmap2,
+                radius=self.args.corr_radius,
+                num_levels=self.args.corr_levels,
             )
             corr_fn_nir = corr_block(
-                fmap1_nir, fmap2, radius=self.args.corr_radius, num_levels=self.args.corr_levels
+                fmap1_nir,
+                fmap2,
+                radius=self.args.corr_radius,
+                num_levels=self.args.corr_levels,
             )
 
         coords0, coords1 = self.initialize_flow(net_list[0])
@@ -317,14 +343,9 @@ class RAFTStereoFusion(nn.Module):
         if test_mode:
             return coords1 - coords0, flow_up
 
-
-        if (
-            torch.isnan(flow_predictions[-1]).any()
-        ):
+        if torch.isnan(flow_predictions[-1]).any():
             for i in range(flow_predictions[-1].shape[0]):
                 print("fmap", fmap1[i], fmap2[i])
                 print("cnet_out", net_list[-1][i])
-                
-           
 
         return flow_predictions
