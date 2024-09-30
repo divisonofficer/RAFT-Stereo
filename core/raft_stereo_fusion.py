@@ -167,8 +167,9 @@ class RAFTStereoFusion(nn.Module):
                 return (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
 
             cnet_list = self.cnet(
-                torch.cat((image_viz_left, image_viz_right), dim=0),
-                torch.cat((image_nir_left, image_nir_right), dim=0),
+                image_viz_left,
+                image_viz_right,
+                num_layers=self.args.n_gru_layers,
             )
         if spectral_feature:
             return (
