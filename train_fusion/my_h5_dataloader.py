@@ -12,8 +12,10 @@ from myutils.hy5py import calibration_property, read_lidar
 from myutils.matrix import rmse_loss
 from myutils.points import (
     combine_disparity_by_lidar,
+    pad_lidar_points,
     project_points_on_camera,
     refine_disparity,
+    refine_disparity_with_monodepth,
     transform_point_inverse,
 )
 
@@ -123,21 +125,26 @@ class MyH5DataSet(data.Dataset):
             cx = 351.19399470967926
             cx2 = 351.89804045
             lidar_projected_points[:, 2] = (
-                focal_length * baseline / lidar_projected_points[:, 2] - cx2 + cx
+                focal_length * baseline / lidar_projected_points[:, 2] - 1
             )
+
+            lidar_projected_points = pad_lidar_points(lidar_projected_points, 5000)
 
             disparity_rgb = frame["disparity/rgb"][:].squeeze()
             disparity_nir = frame["disparity/nir"][:].squeeze()
+            monodepth_rgb = frame["depth_mono/rgb"][:].squeeze()
+            monodepth_nir = frame["depth_mono/nir"][:].squeeze()
+            disparity_rgb = refine_disparity_with_monodepth(
+                disparity_rgb, monodepth_rgb
+            )
+            disparity_nir = refine_disparity_with_monodepth(
+                disparity_nir, monodepth_nir
+            )
             disparity = combine_disparity_by_lidar(
                 lidar_projected_points, disparity_rgb, disparity_nir
             )
             disparity = torch.from_numpy(disparity).unsqueeze(-1).permute(2, 0, 1)
 
-            while len(lidar_projected_points) < 5000:
-                lidar_projected_points = np.concatenate(
-                    [lidar_projected_points, lidar_projected_points], axis=0
-                )
-            lidar_projected_points = lidar_projected_points[:5000]
         lidar_projected_points = torch.from_numpy(lidar_projected_points).float()
 
         if resolution[0] < 540:
@@ -147,7 +154,7 @@ class MyH5DataSet(data.Dataset):
         rgb_right = self.imread(os.path.join(frame_path, "rgb", "right.png"))
         nir_left = self.imread(os.path.join(frame_path, "nir", "left.png"), gray=True)
         nir_right = self.imread(os.path.join(frame_path, "nir", "right.png"), gray=True)
-        disparity = refine_disparity(disparity, rgb_left, rgb_right)
+
         return (
             rgb_left,
             rgb_right,
