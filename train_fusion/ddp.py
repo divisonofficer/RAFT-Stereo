@@ -4,7 +4,7 @@ import signal
 import logging
 import traceback
 from pathlib import Path
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, List, Tuple
 
 import torch
 import torch.distributed as dist
@@ -98,6 +98,10 @@ class DDPTrainer:
     def train_mode(self):
         self.model.train()
 
+    def log_figures(self, idx: int, batch: List[torch.Tensor]):
+        """텐서보드에 이미지 기록"""
+        raise NotImplementedError("이미지 기록 메소드를 재정의해야 합니다 ")
+
     def train(self):
         """학습 과정을 정의합니다."""
         self.train_mode()
@@ -126,6 +130,9 @@ class DDPTrainer:
                     self.scheduler.step()
                     self.scaler.update()
                     self.total_steps += 1
+
+                    if i_batch % 100 == 0 and dist.get_rank() == 0:
+                        self.log_figures(i_batch, data_blob)
 
                     if (
                         dist.get_rank() == 0

@@ -157,6 +157,15 @@ class RAFTStereoFusion(nn.Module):
                 [image_viz_left, image_viz_right], [image_nir_left, image_nir_right]
             )
 
+            if attention_debug:
+                fmap1_rgb, fmap2_rgb = self.fnet.encoder(
+                    [image_viz_left, image_viz_right]
+                )
+                fmap1_nir, fmap2_nir = self.fnet.encoder(
+                    [image_nir_left, image_nir_right]
+                )
+                return (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
+
             cnet_list = self.cnet(
                 torch.cat((image_viz_left, image_viz_right), dim=0),
                 torch.cat((image_nir_left, image_nir_right), dim=0),

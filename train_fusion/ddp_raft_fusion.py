@@ -1,4 +1,5 @@
 from typing import Any, Callable, Dict, List, Tuple
+import numpy as np
 import torch
 import os
 import sys
@@ -21,8 +22,13 @@ from fusion_args import FusionArgs
 from train_fusion.ddp import DDPTrainer
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from train_fusion.loss_function import self_supervised_loss, gt_loss
+from train_fusion.loss_function import (
+    reproject_disparity,
+    self_supervised_loss,
+    gt_loss,
+)
 from train_fusion.my_h5_dataloader import MyH5DataSet
+import matplotlib.pyplot as plt
 
 
 class RaftTrainer(DDPTrainer):
@@ -79,6 +85,55 @@ class RaftTrainer(DDPTrainer):
                 batch_size=self.args.batch_size,
                 sampler=valid_sampler,
             ),
+        )
+
+    def create_image_figure(self, image, cmap=None):
+        fig, ax = plt.subplots()
+        if image.ndim > 3:
+            image = image[0]
+        if image.shape[0] < 100:
+            image = image.permute(1, 2, 0).cpu().numpy()
+        if cmap is not None:
+            ax.imshow(image, cmap=cmap, vmin=0, vmax=32)
+        else:
+            ax.imshow(image.astype(np.uint8))
+        return fig
+
+    def log_figures(self, idx: int, batch: List[torch.Tensor]):
+        left_rgb, right_rgb, left_nir, right_nir, _, disp_gt = batch
+        with torch.no_grad():
+            _, flow = self.model(
+                {
+                    "image_viz_left": left_rgb,
+                    "image_viz_right": right_rgb,
+                    "image_nir_left": left_nir,
+                    "image_nir_right": right_nir,
+                    "iters": 12,
+                    "test_mode": True,
+                    "flow_init": None,
+                    "heuristic_nir": False,
+                    "attention_out_mode": False,
+                }
+            )
+        right_rgb_warped = reproject_disparity(flow, left_rgb)
+        self.logger.writer.add_figure(
+            "disparity",
+            self.create_image_figure(-flow[0, 0].cpu().numpy(), "magma"),
+            idx,
+        )
+        self.logger.writer.add_figure(
+            "disparity_gt",
+            self.create_image_figure(disp_gt[0, 0].cpu().numpy(), "magma"),
+            idx,
+        )
+        self.logger.writer.add_figure(
+            "left_rgb", self.create_image_figure(left_rgb[0]), idx
+        )
+        self.logger.writer.add_figure(
+            "right_rgb", self.create_image_figure(right_rgb[0]), idx
+        )
+        self.logger.writer.add_figure(
+            "right_rgb_warped", self.create_image_figure(right_rgb_warped[0]), idx
         )
 
     def init_loss_function(self) -> Callable[..., Any]:

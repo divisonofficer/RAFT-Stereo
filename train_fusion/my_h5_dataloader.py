@@ -10,7 +10,12 @@ import numpy as np
 
 from myutils.hy5py import calibration_property, read_lidar
 from myutils.matrix import rmse_loss
-from myutils.points import project_points_on_camera, transform_point_inverse
+from myutils.points import (
+    combine_disparity_by_lidar,
+    project_points_on_camera,
+    refine_disparity,
+    transform_point_inverse,
+)
 
 
 class MyH5DataSet(data.Dataset):
@@ -98,70 +103,6 @@ class MyH5DataSet(data.Dataset):
 
         return tensor
 
-    def combine_disparity(
-        self, lidar_points, disparity_rgb, disparity_nir, block_width=24
-    ):
-        # Get image dimensions
-
-        height, width = disparity_rgb.shape
-        u, v, z = lidar_points.T
-        u = u.astype(np.int32)
-        v = v.astype(np.int32)
-
-        num_blocks = (width + block_width - 1) // block_width  # Ceiling division
-
-        # Initialize combined disparity map
-        combined_disparity = np.zeros_like(disparity_rgb)
-
-        for block_idx in range(num_blocks):
-            # Define the horizontal range for the current block
-            start_u = block_idx * block_width
-            end_u = min((block_idx + 1) * block_width, width)
-
-            # Identify LiDAR points within the current block
-            in_block = (u >= start_u) & (u < end_u)
-
-            if not np.any(in_block):
-                # If no points in this block, default to disparity_rgb
-                combined_disparity[:, start_u:end_u] = disparity_rgb[:, start_u:end_u]
-                continue
-
-            # Get the indices of points in the current block
-            block_u = u[in_block]
-            block_v = v[in_block]
-            block_z = z[in_block]
-
-            # Ensure u and v are within image bounds
-            valid = (
-                (block_u >= 0) & (block_u < width) & (block_v >= 0) & (block_v < height)
-            )
-            block_u = block_u[valid]
-            block_v = block_v[valid]
-            block_z = block_z[valid]
-
-            if len(block_z) == 0:
-                # No valid points after filtering
-                combined_disparity[:, start_u:end_u] = disparity_rgb[:, start_u:end_u]
-                continue
-
-            # Sample disparity values from both maps
-            sampled_rgb = disparity_rgb[block_v, block_u]
-            sampled_nir = disparity_nir[block_v, block_u]
-
-            # Compute RMSE loss for both disparity maps
-            rgb_loss = rmse_loss(block_z, sampled_rgb)
-            nir_loss = rmse_loss(block_z, sampled_nir)
-
-            # Choose the disparity map with lower loss for this block
-            if rgb_loss < nir_loss:
-                chosen_disparity = disparity_rgb[:, start_u:end_u]
-            else:
-                chosen_disparity = disparity_nir[:, start_u:end_u]
-
-            # Assign the chosen disparity to the combined map
-            combined_disparity[:, start_u:end_u] = chosen_disparity
-        return combined_disparity
-
     def __getitem__(self, index):
         h5_path, frame_path = self.frame_id_list[index]
         if type(h5_path) == bytes:
@@ -187,7 +128,7 @@ class MyH5DataSet(data.Dataset):
 
             disparity_rgb = frame["disparity/rgb"][:].squeeze()
             disparity_nir = frame["disparity/nir"][:].squeeze()
-            disparity = self.combine_disparity(
+            disparity = combine_disparity_by_lidar(
                 lidar_projected_points, disparity_rgb, disparity_nir
             )
             disparity = torch.from_numpy(disparity).unsqueeze(-1).permute(2, 0, 1)
@@ -206,6 +147,7 @@ class MyH5DataSet(data.Dataset):
         rgb_right = self.imread(os.path.join(frame_path, "rgb", "right.png"))
         nir_left = self.imread(os.path.join(frame_path, "nir", "left.png"), gray=True)
         nir_right = self.imread(os.path.join(frame_path, "nir", "right.png"), gray=True)
+        disparity = refine_disparity(disparity, rgb_left, rgb_right)
         return (
             rgb_left,
             rgb_right,
