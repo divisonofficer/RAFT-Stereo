@@ -143,6 +143,7 @@ def combine_disparity_by_lidar(
         in_block = (u >= start_u) & (u < end_u)
 
         if not np.any(in_block):
+            print("no_points in block")
             # If no points in this block, default to disparity_rgb
             combined_disparity[:, start_u:end_u] = disparity_rgb[:, start_u:end_u]
             continue
