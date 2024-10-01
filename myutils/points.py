@@ -1,6 +1,8 @@
+from typing import Callable, Optional, Tuple
 import numpy as np
 import torch
 import cv2
+from myutils.image_process import disparity_image_edge_eval
 from myutils.matrix import rmse_loss, mae_loss
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter
@@ -117,6 +119,20 @@ def points_sampled_disparity_loss(
     return rmse_loss(points[:, 2], points_sampled[:, 2])
 
 
+def lidar_points_to_disparity(
+    points: np.ndarray,
+    transform_mtx: np.ndarray,
+    focal_length: float,
+    baseline: float,
+    cx: float,
+    cy: float,
+):
+    points = transform_point_inverse(points, transform_mtx)
+    points = project_points_on_camera(points, focal_length, cx, cy, 720, 540)
+    points[:, 2] = focal_length * baseline / points[:, 2] - 1
+    return points
+
+
 def pad_lidar_points(lidar_projected_points, target_size=5000):
     current_size = len(lidar_projected_points)
 
@@ -140,6 +156,60 @@ def pad_lidar_points(lidar_projected_points, target_size=5000):
     return padded_lidar_projected_points
 
 
+def combine_block(
+    lidar_points: np.ndarray,
+    disparity_rgb: np.ndarray,
+    disparity_nir: np.ndarray,
+    combined_disparity: np.ndarray,
+    criteria: Callable[
+        [np.ndarray, np.ndarray, np.ndarray, Optional[Tuple[int, int, int, int]]], bool
+    ],
+    blk_w=24,
+    blk_h=24,
+):
+    width = disparity_rgb.shape[-1]
+    height = disparity_rgb.shape[-2]
+    n_blk_u = (width + blk_w - 1) // blk_w  # Ceiling division
+    n_blk_v = (height + blk_h - 1) // blk_h  # Ceiling division
+    u, v, z = lidar_points.T
+    for blk_v_idx in range(n_blk_v):
+        for blk_u_idx in range(n_blk_u):
+            # Define the vertical block boundaries
+            st_v = blk_v_idx * blk_h
+            en_v = min((blk_v_idx + 1) * blk_h, height)
+            st_u = blk_u_idx * blk_w
+            en_u = min((blk_u_idx + 1) * blk_w, width)
+
+            # Identify LiDAR points within the current vertical block
+            in_block = (u >= st_u) & (u < en_u) & (v >= st_v) & (v < en_v)
+
+            if not np.any(in_block):
+                # No points in this vertical block; retain the horizontal-based disparity
+                continue
+
+            # Get the indices of points in the current block
+            bu, bv, bz = lidar_points[in_block].T
+
+            # Ensure u and v are within image bounds
+            valid = (bu >= 0) & (bu < width) & (bv >= 0) & (bv < height)
+            bu, bv, bz = np.stack([bu, bv, bz], axis=1)[valid].T
+
+            critic = criteria(
+                bu.astype(np.int32), bv.astype(np.int32), bz, (st_u, en_u, st_v, en_v)
+            )
+
+            # Choose the disparity map with lower loss for this block
+            if critic:
+                chosen_disparity = disparity_rgb[st_v:en_v, st_u:en_u]
+            else:
+                chosen_disparity = disparity_nir[st_v:en_v, st_u:en_u]
+
+            # Assign the chosen disparity to the combined map
+            combined_disparity[st_v:en_v, st_u:en_u] = chosen_disparity
+
+    return combined_disparity
+
+
 def combine_disparity_by_lidar(
     lidar_points: np.ndarray,
     disparity_rgb: np.ndarray,
@@ -159,123 +229,107 @@ def combine_disparity_by_lidar(
 
     Returns:
     - combined_disparity: (H, W) combined disparity map.
-    """
-    # Get image dimensions
-    height, width = disparity_rgb.shape
-    u, v, z = lidar_points.T
-    u = u.astype(np.int32)
-    v = v.astype(np.int32)
 
+    """
     # Initialize combined disparity map with horizontal processing
+    width = disparity_rgb.shape[-1]
+    height = disparity_rgb.shape[-2]
     combined_disparity = np.zeros_like(disparity_rgb)
 
-    # === Horizontal Block Processing ===
-    num_horizontal_blocks = (width + block_width - 1) // block_width  # Ceiling division
+    def criteria(bu, bv, bz, block_bounds):
+        if len(bu) == 0:
+            return False
+        return rmse_loss(disparity_rgb[bv, bu], bz) < rmse_loss(
+            disparity_nir[bv, bu], bz
+        )
 
-    for block_idx in range(num_horizontal_blocks):
-        # Define the horizontal range for the current block
-        start_u = block_idx * block_width
-        end_u = min((block_idx + 1) * block_width, width)
+    combined_disparity = combine_block(
+        lidar_points,
+        disparity_rgb,
+        disparity_nir,
+        combined_disparity,
+        criteria,
+        block_width,
+        height,
+    )
+    combined_disparity = combine_block(
+        lidar_points,
+        disparity_rgb,
+        disparity_nir,
+        combined_disparity,
+        criteria,
+        block_width,
+        block_height,
+    )
 
-        # Identify LiDAR points within the current horizontal block
-        in_block = (u >= start_u) & (u < end_u)
+    return combined_disparity
 
-        if not np.any(in_block):
-            print(f"No LiDAR points in horizontal block {block_idx}")
-            # If no points in this block, default to disparity_rgb
-            combined_disparity[:, start_u:end_u] = disparity_rgb[:, start_u:end_u]
-            continue
 
-        # Get the indices of points in the current block
-        block_u = u[in_block]
-        block_v = v[in_block]
-        block_z = z[in_block]
+def combine_disparity_by_edge(
+    lidar_points: np.ndarray,
+    disparity_rgb: np.ndarray,
+    disparity_nir: np.ndarray,
+    image_rgb: np.ndarray,
+    image_nir: np.ndarray,
+    block_width=24,
+    block_height=24,
+):
+    """
+    Combine two disparity maps (RGB and NIR) using LiDAR points by processing both horizontal and vertical blocks.
 
-        # Ensure u and v are within image bounds
-        valid = (block_u >= 0) & (block_u < width) & (block_v >= 0) & (block_v < height)
-        block_u = block_u[valid]
-        block_v = block_v[valid]
-        block_z = block_z[valid]
+    Parameters:
+    - lidar_points: (N, 3) array of LiDAR points (u, v, z).
+    - disparity_rgb: (H, W) disparity map from RGB.
+    - disparity_nir: (H, W) disparity map from NIR.
+    - block_width: Width of each block for horizontal processing.
+    - block_height: Height of each block for vertical processing.
 
-        if len(block_z) == 0:
-            # No valid points after filtering
-            combined_disparity[:, start_u:end_u] = disparity_rgb[:, start_u:end_u]
-            continue
+    Returns:
+    - combined_disparity: (H, W) combined disparity map.
 
-        # Sample disparity values from both maps
-        sampled_rgb = disparity_rgb[block_v, block_u]
-        sampled_nir = disparity_nir[block_v, block_u]
+    """
+    # Initialize combined disparity map with horizontal processing
+    width = disparity_rgb.shape[-1]
+    height = disparity_rgb.shape[-2]
+    combined_disparity = np.zeros_like(disparity_rgb)
 
-        # Compute RMSE loss for both disparity maps
-        rgb_loss = rmse_loss(block_z, sampled_rgb)
-        nir_loss = rmse_loss(block_z, sampled_nir)
+    def criteria(bu, bv, bz, block_bounds):
+        st_u, en_u, st_v, en_v = block_bounds
+        rgb_edge_eval = disparity_image_edge_eval(
+            disparity_rgb[st_v:en_v, st_u:en_u], image_rgb[st_v:en_v, st_u:en_u]
+        )
+        nir_edge_eval = disparity_image_edge_eval(
+            disparity_nir[st_v:en_v, st_u:en_u], image_nir[st_v:en_v, st_u:en_u]
+        )
+        rgb_rmse = rmse_loss(disparity_rgb[bv, bu], bz) if len(bu) > 0 else 1
+        nir_rmse = rmse_loss(disparity_nir[bv, bu], bz) if len(bu) > 0 else 1
+        min_rmse = min(rgb_rmse, nir_rmse)
+        rgb_rmse -= min_rmse
+        nir_rmse -= min_rmse
 
-        # Choose the disparity map with lower loss for this block
+        rgb_loss_norm = rgb_rmse / (rgb_rmse + nir_rmse) + rgb_edge_eval / (
+            rgb_edge_eval + nir_edge_eval + 1e-6
+        )
+        return rgb_loss_norm < 0.5
 
-        if rgb_loss < nir_loss:
-            chosen_disparity = disparity_rgb[:, start_u:end_u]
-        else:
-            chosen_disparity = disparity_nir[:, start_u:end_u]
-
-        # Assign the chosen disparity to the combined map
-        combined_disparity[:, start_u:end_u] = chosen_disparity
-
-    # === Vertical Block Processing ===
-    num_vertical_blocks_v = (
-        height + block_height - 1
-    ) // block_height  # Ceiling division
-    num_vertical_blocks_u = (
-        width + block_width - 1
-    ) // block_width  # Number of horizontal blocks per vertical step
-
-    for block_v_idx in range(num_vertical_blocks_v):
-        for block_u_idx in range(num_vertical_blocks_u):
-            # Define the vertical block boundaries
-            start_v = block_v_idx * block_height
-            end_v = min((block_v_idx + 1) * block_height, height)
-            start_u = block_u_idx * block_width
-            end_u = min((block_u_idx + 1) * block_width, width)
-
-            # Identify LiDAR points within the current vertical block
-            in_block = (u >= start_u) & (u < end_u) & (v >= start_v) & (v < end_v)
-
-            if not np.any(in_block):
-                # No points in this vertical block; retain the horizontal-based disparity
-                continue
-
-            # Get the indices of points in the current block
-            block_u = u[in_block]
-            block_v = v[in_block]
-            block_z = z[in_block]
-
-            # Ensure u and v are within image bounds
-            valid = (
-                (block_u >= 0) & (block_u < width) & (block_v >= 0) & (block_v < height)
-            )
-            block_u = block_u[valid]
-            block_v = block_v[valid]
-            block_z = block_z[valid]
-
-            if len(block_z) == 0:
-                # No valid points after filtering
-                continue
-
-            # Sample disparity values from both maps
-            sampled_rgb = disparity_rgb[block_v, block_u]
-            sampled_nir = disparity_nir[block_v, block_u]
-
-            # Compute RMSE loss for both disparity maps
-            rgb_loss = rmse_loss(block_z, sampled_rgb)
-            nir_loss = rmse_loss(block_z, sampled_nir)
-
-            # Choose the disparity map with lower loss for this block
-            if rgb_loss < nir_loss:
-                chosen_disparity = disparity_rgb[start_v:end_v, start_u:end_u]
-            else:
-                chosen_disparity = disparity_nir[start_v:end_v, start_u:end_u]
-
-            # Assign the chosen disparity to the combined map
-            combined_disparity[start_v:end_v, start_u:end_u] = chosen_disparity
+    combined_disparity = combine_block(
+        lidar_points,
+        disparity_rgb,
+        disparity_nir,
+        combined_disparity,
+        criteria,
+        block_width,
+        height,
+    )
+    combined_disparity = combine_block(
+        lidar_points,
+        disparity_rgb,
+        disparity_nir,
+        combined_disparity,
+        criteria,
+        block_width,
+        block_height,
+    )
 
     return combined_disparity
 

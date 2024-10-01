@@ -1,3 +1,4 @@
+import random
 from typing import List, Optional
 import cv2
 import h5py
@@ -11,6 +12,7 @@ import numpy as np
 from myutils.hy5py import calibration_property, read_lidar
 from myutils.matrix import rmse_loss
 from myutils.points import (
+    combine_disparity_by_edge,
     combine_disparity_by_lidar,
     pad_lidar_points,
     project_points_on_camera,
@@ -46,6 +48,7 @@ class MyH5DataSet(data.Dataset):
 
             if fast_test and len(frame_id_list) > 100:
                 break
+        frame_id_list = random.sample(frame_id_list, len(frame_id_list))
         self.frame_id_list = frame_id_list
 
     def __len__(self):
@@ -137,11 +140,17 @@ class MyH5DataSet(data.Dataset):
             disparity_rgb = refine_disparity_with_monodepth(
                 disparity_rgb, monodepth_rgb
             )
+            rgb_left = cv2.imread(
+                os.path.join(frame_path, "rgb", "left.png"), cv2.IMREAD_COLOR
+            )
+            nir_left = cv2.imread(
+                os.path.join(frame_path, "nir", "left.png"), cv2.IMREAD_GRAYSCALE
+            )
             disparity_nir = refine_disparity_with_monodepth(
                 disparity_nir, monodepth_nir
             )
-            disparity = combine_disparity_by_lidar(
-                lidar_projected_points, disparity_rgb, disparity_nir
+            disparity = combine_disparity_by_edge(
+                lidar_projected_points, disparity_rgb, disparity_nir, rgb_left, nir_left
             )
             disparity = torch.from_numpy(disparity).unsqueeze(-1).permute(2, 0, 1)
 
