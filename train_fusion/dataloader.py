@@ -6,6 +6,8 @@ import numpy as np
 
 from PIL import Image
 import json
+
+import tqdm
 import pfmread
 import cv2
 
@@ -13,6 +15,83 @@ import cv2
 DRIVING_JSON = "flyingthings3d.json"
 REAL_DATA_JSON = "real_data.json"
 FLYING_JSON = "Flow3dFlyingThings3d.json"
+
+
+class Entity:
+    def get_item(
+        self,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        raise NotImplementedError("You must implement get_item method")
+
+
+class EntityFlying3d(Entity):
+
+    cut_resolution = (540, 720)
+
+    def __init__(self, images: List[str], disparity: List[str]):
+        self.images = images
+        self.disparity = disparity
+
+    def __to_tensor(self, filename):
+        if filename.endswith(".pfm"):
+            img = pfmread.read(filename)
+        else:
+            img = np.array(Image.open(filename)).astype(np.uint8)
+        if self.cut_resolution is not None and (
+            img.shape[0] != self.cut_resolution[0]
+            or img.shape[1] != self.cut_resolution[1]
+        ):
+            w_f = int(img.shape[1] / 2 - self.cut_resolution[1] / 2)
+            h_f = int(img.shape[0] / 2 - self.cut_resolution[0] / 2)
+            w_t = int(img.shape[1] / 2 + self.cut_resolution[1] / 2)
+            h_t = int(img.shape[0] / 2 + self.cut_resolution[0] / 2)
+            img = img[h_f:h_t, w_f:w_t]
+
+        tensor = torch.from_numpy(img.copy())
+        if tensor.dim() == 2:
+            return tensor.unsqueeze(0).float()
+        return tensor.permute(2, 0, 1).float()
+
+    def get_item(
+        self,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        images = [self.__to_tensor(img) for img in self.images]
+
+        indices = torch.randperm(self.cut_resolution[1] * self.cut_resolution[0])[:5000]
+        u = indices % self.cut_resolution[1]
+        v = indices // self.cut_resolution[1]
+
+        disparity = self.__to_tensor(self.disparity[0])
+        disparity_sampled = disparity[:, v, u]
+        disparity_points = torch.stack((u, v, disparity_sampled[0]), dim=0).T.float()
+        return (images[0], images[1], images[2], images[3], disparity_points, disparity)
+
+
+class EntityDataSet(data.Dataset):
+    input_list: List[Entity]
+
+    def __init__(self, input_list: List[Entity]):
+        self.input_list = input_list
+
+    def __getitem__(self, index):
+        return self.input_list[index].get_item()
+
+    def __len__(self):
+        return len(self.input_list)
 
 
 class Entry:
@@ -43,28 +122,25 @@ class StereoDatasetArgs:
     def __init__(
         self,
         folder: str = "/bean/depth",
-        real_data_json=False,
-        real_data_validate=False,
         flow3d_driving_json=False,
         flying3d_json=False,
-        gt_depth=False,
+        fast_test=False,
         synth_no_filter=False,
         synth_no_rgb=False,
         validate_json=False,
-        
     ):
         self.folder = folder
-        self.real_data_json = real_data_json
-        self.real_data_validate = real_data_validate
         self.flow3d_driving_json = flow3d_driving_json
         self.flying3d_json = flying3d_json
-        self.gt_depth = gt_depth
         self.synth_no_filter = synth_no_filter
         self.validate_json = validate_json
         self.synth_no_rgb = synth_no_rgb
+        self.fast_test = fast_test
 
 
-class StereoDataset(data.Dataset):
+class StereoDataset(EntityDataSet):
+    input_list: List[EntityFlying3d]
+
     def __init__(
         self,
         args: StereoDatasetArgs,
@@ -75,60 +151,24 @@ class StereoDataset(data.Dataset):
         self.cut_resolution = cut_resolution
         if copy_of_self:
             return
-        self.input_list: List[Entry] = []
+        self.input_list = []
         if args.flow3d_driving_json:
             self.input_list += self.flow3d_driving_json(
                 DRIVING_JSON, args.validate_json
             )
         if args.flying3d_json:
             self.input_list += self.flow3d_driving_json(FLYING_JSON, args.validate_json)
-        if args.real_data_json:
-            with open(REAL_DATA_JSON, "r") as file:
-                self.input_list = json.load(file)
-        if args.real_data_validate:
-            input_list = self.extract_input_folder(args.folder)
-            if not isinstance(input_list, list):
-                raise ValueError("folder must contain subfolders")
-            self.input_list = input_list
-            with open(REAL_DATA_JSON, "w") as file:
-                json.dump(self.input_list, file)
-        self.input_list.sort(key=lambda x: x.__key__())
-
-    def __to_tensor(self, filename):
-        if filename.endswith(".pfm"):
-            img = pfmread.read(filename)
-        else:
-            img = np.array(Image.open(filename)).astype(np.uint8)
-        if self.cut_resolution is not None and img.shape[0] != self.cut_resolution[0]:
-            w_f = int(img.shape[1] / 2 - self.cut_resolution[1] / 2)
-            h_f = int(img.shape[0] / 2 - self.cut_resolution[0] / 2)
-            w_t = int(img.shape[1] / 2 + self.cut_resolution[1] / 2)
-            h_t = int(img.shape[0] / 2 + self.cut_resolution[0] / 2)
-            img = img[h_f:h_t, w_f:w_t]
-
-        tensor = torch.from_numpy(img.copy())
-        if tensor.dim() == 2:
-            return tensor.unsqueeze(0).float()
-        return tensor.permute(2, 0, 1).float()
-
-    def partial(self, start, end):
-        copy_of_self = StereoDataset(
-            self.args,
-            copy_of_self=True,
-            cut_resolution=self.cut_resolution,
-        )
-        copy_of_self.input_list = self.input_list[start:end]
-
-        return copy_of_self
 
     def flow3d_driving_json(self, filename: str, validate=False):
         with open(filename, "r") as file:
             entries = json.load(file)
-        self.entries: List[Entry] = []
+        self.entries: List[EntityFlying3d] = []
         validate_entries = []
-        for entry in entries:
+        for idx, entry in enumerate(tqdm.tqdm(entries)):
             if self.args.synth_no_filter and "frame_burnt_filtered" in entry:
                 continue
+            if self.args.fast_test and idx > 100:
+                break
 
             if "nir" in entry:
                 nir = entry["nir"]
@@ -139,7 +179,9 @@ class StereoDataset(data.Dataset):
                 )
                 entry["nir"] = nir
             if not self.args.synth_no_rgb:
-                self.entries.append(Entry(entry["rgb"], nir, entry["disparity"]))
+                self.entries.append(
+                    EntityFlying3d([*entry["rgb"], *nir], entry["disparity"])
+                )
 
             for filter in [
                 "frame_burnt_filtered",
@@ -162,7 +204,9 @@ class StereoDataset(data.Dataset):
                     )
                     entry[filter] = filtered
 
-                self.entries.append(Entry(filtered, nir, entry["disparity"]))
+                self.entries.append(
+                    EntityFlying3d([*filtered, *nir], entry["disparity"])
+                )
 
             if validate:
                 validated = True
@@ -192,78 +236,7 @@ class StereoDataset(data.Dataset):
         """
         return: file_name_list, (img_viz_left, img_viz_right, img_nir_left, img_nir_right)
         """
-
-        if self.args.gt_depth:
-            (
-                img_viz_left,
-                img_viz_right,
-                img_nir_left,
-                img_nir_right,
-                dis_gt_left,
-                dis_gt_right,
-            ) = self.input_list[index].__tuple__()
-
-        else:
-            (
-                img_viz_left,
-                img_viz_right,
-                img_nir_left,
-                img_nir_right,
-            ) = self.input_list[index].__tuple__()
-
-        disp = (
-            []
-            if not self.args.gt_depth
-            else (self.__to_tensor(dis_gt_left), self.__to_tensor(dis_gt_right))
-        )
-        return (
-            self.input_list[index].__tuple__(),
-            self.__to_tensor(img_viz_left),
-            self.__to_tensor(img_viz_right),
-            self.__to_tensor(img_nir_left),
-            self.__to_tensor(img_nir_right),
-            *disp,
-        )
+        return self.input_list[index].get_item()
 
     def __len__(self):
         return len(self.input_list)
-
-    def extract_input_folder(self, folder: str):
-        files = os.listdir(folder)
-        if "rgb" in files and "nir" in files:
-            return self.extract_input_from_item(folder)
-
-        sub_folders = [
-            os.path.join(folder, f)
-            for f in files
-            if os.path.isdir(os.path.join(folder, f))
-        ]
-
-        if len(sub_folders) < 1:
-            return None
-
-        input_list: List[Entry] = []
-        for sub_folder in sub_folders:
-            inputs = self.extract_input_folder(sub_folder)
-            if inputs is None or (isinstance(inputs, list) and len(inputs)) == 0:
-                continue
-            if isinstance(inputs, List):
-                input_list.extend(inputs)
-            else:
-                input_list.append(inputs)
-        return input_list
-
-    def extract_input_from_item(self, folder: str):
-        img_viz_left = os.path.join(folder, "rgb", "left.png")
-        img_viz_right = os.path.join(folder, "rgb", "right.png")
-        img_nir_left = os.path.join(folder, "nir", "left.png")
-        img_nir_right = os.path.join(folder, "nir", "right.png")
-        # disparity_viz = os.path.join(folder, "rgb", "disparity.png")
-        # disparity_nir = os.path.join(folder, "nir", "disparity.png")
-        if not os.path.exists(img_viz_left) or not os.path.exists(img_nir_right):
-            return None
-        return Entry(
-            (img_viz_left, img_viz_right),
-            (img_nir_left, img_nir_right),
-            None,
-        )

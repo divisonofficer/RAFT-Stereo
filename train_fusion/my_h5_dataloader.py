@@ -1,5 +1,5 @@
 import random
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import cv2
 import h5py
 import os
@@ -22,71 +22,13 @@ from myutils.points import (
 )
 
 
-class MyH5DataSet(data.Dataset):
+from train_fusion.dataloader import Entity, EntityDataSet
 
-    def __init__(
-        self,
-        root="/bean/depth",
-        fast_test=False,
-        frame_cache=False,
-        update_cache=False,
-        id_list: Optional[List[str]] = None,
-    ):
-        self.transform_mtx = np.load("jai_transform.npy")
-        self.frame_cache = frame_cache
-        self.update_cache = update_cache
-        if id_list is not None:
-            self.frame_id_list = id_list
-            return
-        ## find h5 files
-        h5files = self.find_h5_files(root)
 
-        ## read h5 files and get frame_id list
-        frame_id_list = []
-        for h5file in tqdm(h5files):
-            frame_id_list += list(self.read_h5_file(h5file))
-
-            if fast_test and len(frame_id_list) > 100:
-                break
-        frame_id_list = random.sample(frame_id_list, len(frame_id_list))
-        self.frame_id_list = frame_id_list
-
-    def __len__(self):
-        return len(self.frame_id_list)
-
-    def find_h5_files(self, root):
-        h5_files = []
-        for folder in os.listdir(root):
-            folder = os.path.join(root, folder)
-            if not os.path.isdir(folder):
-                continue
-            for file in os.listdir(folder):
-                if file.endswith(".hdf5"):
-                    h5_files.append(os.path.join(folder, file))
-        return h5_files
-
-    def read_h5_file(self, h5_file):
-        frame_id_ret = []
-        with h5py.File(h5_file, "a" if self.update_cache else "r", swmr=True) as f:
-            if self.frame_cache and "frame_ids" in f:
-                frame_ids = f["frame_ids"][:]
-                f.close()
-                return frame_ids
-            frame_ids = list(f["frame"].keys())
-            for frame_id in frame_ids:
-                frame = f.require_group(f"frame/{frame_id}")
-                if "disparity" in frame:
-                    if "align_error" in frame.attrs and frame.attrs["align_error"]:
-                        continue
-                    frame_id_ret.append(
-                        (h5_file, os.path.join(os.path.dirname(h5_file), frame_id))
-                    )
-            if self.update_cache:
-                if "frame_ids" in f:
-                    del f["frame_ids"]
-                f.create_dataset("frame_ids", data=frame_id_ret)
-            f.close()
-        return frame_id_ret
+class MyH5Entity(Entity):
+    def __init__(self, h5_path, frame_path):
+        self.h5_path = h5_path
+        self.frame_path = frame_path
 
     def imread(self, path: str, gray=False):
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE if gray else cv2.IMREAD_ANYCOLOR)
@@ -108,11 +50,22 @@ class MyH5DataSet(data.Dataset):
 
         return tensor
 
-    def __getitem__(self, index):
-        h5_path, frame_path = self.frame_id_list[index]
+    def get_item(
+        self,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        h5_path = self.h5_path
+        frame_path = self.frame_path
         if type(h5_path) == bytes:
             h5_path = h5_path.decode("utf-8")
             frame_path = frame_path.decode("utf-8")
+        transform_mtx = np.load("jai_transform.npy")
         resolution = cv2.imread(os.path.join(frame_path, "rgb", "left.png")).shape
         with h5py.File(h5_path, "r", swmr=True) as f:
             frame = f.require_group(f"frame/{frame_path.split('/')[-1]}")
@@ -121,7 +74,7 @@ class MyH5DataSet(data.Dataset):
             )
 
             lidar_points = read_lidar(frame)
-            lidar_points = transform_point_inverse(lidar_points, self.transform_mtx)
+            lidar_points = transform_point_inverse(lidar_points, transform_mtx)
             lidar_projected_points = project_points_on_camera(
                 lidar_points, focal_length, cx, cy, resolution[1], resolution[0]
             )
@@ -133,8 +86,8 @@ class MyH5DataSet(data.Dataset):
 
             lidar_projected_points = pad_lidar_points(lidar_projected_points, 5000)
 
-            disparity_rgb = frame["disparity/rgb"][:].squeeze()
-            disparity_nir = frame["disparity/nir"][:].squeeze()
+            disparity_rgb = frame["disparity/rgb"][:].squeeze()[:540, :720]
+            disparity_nir = frame["disparity/nir"][:].squeeze()[:540, :720]
             monodepth_rgb = frame["depth_mono/rgb"][:].squeeze()
             monodepth_nir = frame["depth_mono/nir"][:].squeeze()
             disparity_rgb = refine_disparity_with_monodepth(
@@ -172,3 +125,66 @@ class MyH5DataSet(data.Dataset):
             lidar_projected_points,
             disparity,
         )
+
+
+class MyH5DataSet(EntityDataSet):
+    def __init__(
+        self, root="/bean/depth", fast_test=False, frame_cache=False, update_cache=False
+    ):
+        self.transform_mtx = np.load("jai_transform.npy")
+        self.frame_cache = frame_cache
+        self.update_cache = update_cache
+        ## find h5 files
+        h5files = self.find_h5_files(root)
+
+        ## read h5 files and get frame_id list
+        frame_id_list: List[MyH5Entity] = []
+        for h5file in tqdm(h5files):
+            frame_id_list += list(self.read_h5_file(h5file))
+
+            if fast_test and len(frame_id_list) > 100:
+                break
+        frame_id_list = random.sample(frame_id_list, len(frame_id_list))
+        self.input_list = frame_id_list
+
+    def __len__(self):
+        return len(self.input_list)
+
+    def find_h5_files(self, root):
+        h5_files = []
+        for folder in os.listdir(root):
+            folder = os.path.join(root, folder)
+            if not os.path.isdir(folder):
+                continue
+            for file in os.listdir(folder):
+                if file.endswith(".hdf5"):
+                    h5_files.append(os.path.join(folder, file))
+        return h5_files
+
+    def read_h5_file(self, h5_file):
+        frame_id_ret: List[MyH5Entity] = []
+        with h5py.File(h5_file, "a" if self.update_cache else "r", swmr=True) as f:
+            if self.frame_cache and "frame_ids" in f:
+                frame_ids = f["frame_ids"][:]
+                f.close()
+                return [MyH5Entity(*x) for x in frame_ids[:]]
+            frame_ids = list(f["frame"].keys())
+            for frame_id in frame_ids:
+                frame = f.require_group(f"frame/{frame_id}")
+                if "disparity" in frame:
+                    if "align_error" in frame.attrs and frame.attrs["align_error"]:
+                        continue
+                    frame_id_ret.append(
+                        MyH5Entity(
+                            h5_file, os.path.join(os.path.dirname(h5_file), frame_id)
+                        )
+                    )
+            if self.update_cache:
+                if "frame_ids" in f:
+                    del f["frame_ids"]
+                f.create_dataset("frame_ids", data=frame_id_ret)
+            f.close()
+        return frame_id_ret
+
+    def __getitem__(self, index):
+        return self.input_list[index].get_item()
