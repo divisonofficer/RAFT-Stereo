@@ -26,7 +26,7 @@ def pixel_graident(img: np.ndarray):
     return gradient_magnitude
 
 
-def disparity_image_edge_eval(disparity: np.ndarray, image: np.ndarray):
+def disparity_image_edge(disparity: np.ndarray, image: np.ndarray):
     intensity = int(np.median(image))
     if intensity > 100:
         intensity = 100
@@ -34,7 +34,12 @@ def disparity_image_edge_eval(disparity: np.ndarray, image: np.ndarray):
     disp_gradient = pixel_graident(disparity)
     edge_disp = np.zeros_like(edge_img)
     edge_disp[disp_gradient > 2] = 255
-    return rmse_loss(edge_img.astype(np.float32), edge_disp.astype(np.float32))
+    return edge_img.astype(np.float32) / 255, edge_disp.astype(np.float32) / 255
+
+
+def disparity_image_edge_eval(disparity: np.ndarray, image: np.ndarray):
+    edge_img, edge_disp = disparity_image_edge(disparity, image)
+    return rmse_loss(edge_img, edge_disp)
 
 
 def read_image_pair(

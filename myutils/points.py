@@ -2,7 +2,7 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 import torch
 import cv2
-from myutils.image_process import disparity_image_edge_eval
+from myutils.image_process import disparity_image_edge, disparity_image_edge_eval
 from myutils.matrix import rmse_loss, mae_loss
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter
@@ -292,15 +292,30 @@ def combine_disparity_by_edge(
     width = disparity_rgb.shape[-1]
     height = disparity_rgb.shape[-2]
     combined_disparity = np.zeros_like(disparity_rgb)
+    edge_rgb, edge_disp_rgb = disparity_image_edge(disparity_rgb, image_rgb)
+    edge_nir, edge_disp_nir = disparity_image_edge(disparity_nir, image_nir)
 
     def criteria(bu, bv, bz, block_bounds):
         st_u, en_u, st_v, en_v = block_bounds
-        rgb_edge_eval = disparity_image_edge_eval(
-            disparity_rgb[st_v:en_v, st_u:en_u], image_rgb[st_v:en_v, st_u:en_u]
+        rgb_edge_eval = (
+            rmse_loss(
+                edge_rgb[st_v:en_v, st_u:en_u], edge_disp_rgb[st_v:en_v, st_u:en_u]
+            )
+            + rmse_loss(
+                edge_nir[st_v:en_v, st_u:en_u], edge_disp_rgb[st_v:en_v, st_u:en_u]
+            )
+            / 2
         )
-        nir_edge_eval = disparity_image_edge_eval(
-            disparity_nir[st_v:en_v, st_u:en_u], image_nir[st_v:en_v, st_u:en_u]
+        nir_edge_eval = (
+            rmse_loss(
+                edge_nir[st_v:en_v, st_u:en_u], edge_disp_nir[st_v:en_v, st_u:en_u]
+            )
+            + rmse_loss(
+                edge_rgb[st_v:en_v, st_u:en_u], edge_disp_nir[st_v:en_v, st_u:en_u]
+            )
+            / 2
         )
+
         rgb_rmse = rmse_loss(disparity_rgb[bv, bu], bz) if len(bu) > 0 else 1
         nir_rmse = rmse_loss(disparity_nir[bv, bu], bz) if len(bu) > 0 else 1
         min_rmse = min(rgb_rmse, nir_rmse)
