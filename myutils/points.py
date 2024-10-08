@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, Union
 import numpy as np
 import torch
 import cv2
@@ -37,6 +37,99 @@ def transform_point_inverse(points: np.ndarray, transform_mtx: np.ndarray):
     return transfrom_points(points, transform_mtx)
 
 
+def lidar_points_to_disparity_with_cal(
+    points: np.ndarray,
+    transform_mtx: np.ndarray,
+    calibration_dict: dict,
+    points_scale=1000,
+):
+    points = points.reshape(-1, 3) * points_scale
+    fx = calibration_dict["mtx_left"][0, 0]
+    cx = calibration_dict["mtx_left"][0, 2]
+    cx_r = calibration_dict["mtx_right"][0, 2]
+    cy = calibration_dict["mtx_left"][1, 2]
+    baseline = np.linalg.norm(calibration_dict["T"])
+
+    points = transform_point_inverse(points, transform_mtx)
+    points = project_points_on_camera(points, fx, cx, cy, 720, 540)
+    points[:, 2] = fx * baseline / points[:, 2] + cx - cx_r
+    return points
+
+
+def depth_points_to_disparity_with_cal(
+    points: np.ndarray,
+    calibration_dict: dict,
+):
+    fx = calibration_dict["mtx_left"][0, 0]
+    baseline = np.linalg.norm(calibration_dict["T"])
+    points[:, 2] = (
+        fx * baseline / points[:, 2]
+        + calibration_dict["mtx_left"][0, 2]
+        - calibration_dict["mtx_right"][0, 2]
+    )
+    return points
+
+
+def disparity_points_to_depth_with_cal(
+    points: Union[np.ndarray, torch.Tensor],
+    calibration_dict: dict,
+    width=720,
+    height=540,
+):
+    points = points[
+        (points[:, 0] < width)
+        & (points[:, 1] < height)
+        & (points[:, 2] > 0)
+        & (points[:, 0] >= 0)
+        & (points[:, 1] >= 0)
+    ]
+    fx = calibration_dict["mtx_left"][0, 0]
+    baseline = np.linalg.norm(calibration_dict["T"])
+
+    points[:, 2] = (
+        fx
+        * baseline
+        / (
+            points[:, 2]
+            - (calibration_dict["mtx_left"][0, 2] - calibration_dict["mtx_right"][0, 2])
+        )
+    )
+    return points
+
+
+def refine_disparity_points(points: torch.Tensor, thresh_dist=0.5, thresh_disp=0.85):
+    # u, v, d 좌표 분리
+    u = points[:, 0]
+    v = points[:, 1]
+    d = points[:, 2]
+
+    # 거리 계산 함수
+    def calculate_distances(u, v):
+        # (N, 1) - (1, N) 으로 브로드캐스팅하여 모든 쌍의 유클리드 거리 계산
+        dist_u = u.unsqueeze(1) - u.unsqueeze(0)
+        dist_v = v.unsqueeze(1) - v.unsqueeze(0)
+        distances = torch.sqrt(dist_u**2 + dist_v**2)
+        return distances
+
+    # 거리 행렬 계산
+    distances = calculate_distances(u, v)
+
+    # 각 포인트의 거리 d 내에서 다른 포인트 찾기
+    mask = distances <= d.unsqueeze(1) * thresh_dist
+
+    # 2배 이상 큰 d 값을 가진 포인트 필터링
+    d_ratio = d.unsqueeze(1) / d.unsqueeze(0)
+    remove_mask = (d_ratio < thresh_disp) & mask
+
+    # remove_mask를 통해 제거할 포인트를 남기지 않는 새로운 인덱스 계산
+    keep_indices = ~(remove_mask.any(dim=1))
+
+    # 최종 남은 포인트들
+    filtered_points = points[keep_indices]
+
+    return filtered_points
+
+
 def project_points_on_camera(
     points: np.ndarray,
     focal_length: float,
@@ -69,6 +162,38 @@ def project_points_on_camera(
             & (points[:, 2] > 0)
         ]
     return points
+
+
+def depth_points_to_depth_map(points: np.ndarray, width=720, height=540):
+    points = points[
+        (points[:, 0] < width)
+        & (points[:, 1] < height)
+        & (points[:, 2] > 0)
+        & (points[:, 0] >= 0)
+        & (points[:, 1] >= 0)
+    ]
+    depth_map = np.zeros((height, width), dtype=np.float32)
+    u, v, d = points.T
+    u = u.astype(int)
+    v = v.astype(int)
+    depth_map[v, u] = d
+    return depth_map
+
+
+def torch_depth_points_to_depth_map(points: torch.Tensor, width=720, height=540):
+    depth_map = torch.zeros((height, width), dtype=torch.float32)
+    points = points[
+        (points[:, 0] < width)
+        & (points[:, 1] < height)
+        & (points[:, 2] > 0)
+        & (points[:, 0] >= 0)
+        & (points[:, 1] >= 0)
+    ]
+    u, v, d = points.T
+    u = u.int()
+    v = v.int()
+    depth_map[v, u] = d
+    return depth_map
 
 
 def render_depth_map(

@@ -1,5 +1,6 @@
 import os
-from typing import List, Optional, Tuple
+import random
+from typing import List, Optional, Tuple, Union
 import torch
 import torch.utils.data as data
 import numpy as np
@@ -8,6 +9,7 @@ from PIL import Image
 import json
 
 import tqdm
+from myutils.image_process import gamma_correction, guided_filter
 import pfmread
 import cv2
 
@@ -35,11 +37,19 @@ class EntityFlying3d(Entity):
 
     cut_resolution = (540, 720)
 
-    def __init__(self, images: List[str], disparity: List[str]):
+    def __init__(
+        self,
+        images: List[str],
+        disparity: List[str],
+        guided_noise=None,
+        gamma_noise=None,
+    ):
         self.images = images
         self.disparity = disparity
+        self.guided_noise = guided_noise
+        self.gamma_noise = gamma_noise
 
-    def __to_tensor(self, filename):
+    def __read_img(self, filename):
         if filename.endswith(".pfm"):
             img = pfmread.read(filename)
         else:
@@ -53,6 +63,14 @@ class EntityFlying3d(Entity):
             w_t = int(img.shape[1] / 2 + self.cut_resolution[1] / 2)
             h_t = int(img.shape[0] / 2 + self.cut_resolution[0] / 2)
             img = img[h_f:h_t, w_f:w_t]
+
+        return img
+
+    def __to_tensor(self, filename: Union[str, np.ndarray]):
+        if isinstance(filename, np.ndarray):
+            img = filename
+        else:
+            img = self.__read_img(filename)
 
         tensor = torch.from_numpy(img.copy())
         if tensor.dim() == 2:
@@ -69,7 +87,20 @@ class EntityFlying3d(Entity):
         torch.Tensor,
         torch.Tensor,
     ]:
-        images = [self.__to_tensor(img) for img in self.images]
+        images = [self.__read_img(img) for img in self.images]
+
+        if self.guided_noise is not None:
+            images[0] = guided_filter(images[2], images[0], self.guided_noise + 2, 1e-6)
+            images[1] = guided_filter(images[3], images[0], self.guided_noise + 2, 1e-6)
+        if self.gamma_noise is not None:
+            images[0] = gamma_correction(
+                images[0], self.gamma_noise + random.random() + 0.1
+            )
+            images[1] = gamma_correction(
+                images[1], self.gamma_noise + random.random() + 0.1
+            )
+
+        images = [self.__to_tensor(img) for img in images]
 
         indices = torch.randperm(self.cut_resolution[1] * self.cut_resolution[0])[:5000]
         u = indices % self.cut_resolution[1]
@@ -128,6 +159,7 @@ class StereoDatasetArgs:
         synth_no_filter=False,
         synth_no_rgb=False,
         validate_json=False,
+        noised_input=False,
     ):
         self.folder = folder
         self.flow3d_driving_json = flow3d_driving_json
@@ -136,6 +168,7 @@ class StereoDatasetArgs:
         self.validate_json = validate_json
         self.synth_no_rgb = synth_no_rgb
         self.fast_test = fast_test
+        self.noised_input = noised_input
 
 
 class StereoDataset(EntityDataSet):
@@ -182,6 +215,16 @@ class StereoDataset(EntityDataSet):
                 self.entries.append(
                     EntityFlying3d([*entry["rgb"], *nir], entry["disparity"])
                 )
+                if self.args.noised_input:
+                    for _ in range(10):
+                        self.entries.append(
+                            EntityFlying3d(
+                                [*entry["rgb"], *nir],
+                                entry["disparity"],
+                                guided_noise=int((random.random() * 100) % 20),
+                                gamma_noise=(random.random() * 2),
+                            )
+                        )
 
             for filter in [
                 "frame_burnt_filtered",
@@ -207,6 +250,16 @@ class StereoDataset(EntityDataSet):
                 self.entries.append(
                     EntityFlying3d([*filtered, *nir], entry["disparity"])
                 )
+                if self.args.noised_input:
+                    for _ in range(3):
+                        self.entries.append(
+                            EntityFlying3d(
+                                [*filtered, *nir],
+                                entry["disparity"],
+                                guided_noise=int((random.random() * 100) % 20),
+                                gamma_noise=(random.random() * 2),
+                            )
+                        )
 
             if validate:
                 validated = True

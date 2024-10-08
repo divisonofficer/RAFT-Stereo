@@ -55,3 +55,52 @@ def read_image_pair(
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         ret.append(img)
     return tuple(ret)
+
+
+def guided_filter(I: np.ndarray, p: np.ndarray, radius=15, eps=1e-6):
+    # I: guide image (grayscale)
+    # p: input image to be filtered (color)
+    # radius: window radius
+    # eps: regularization parameter
+
+    # Step 1: Mean of I, p, I*p, and I^2
+
+    mean_I = cv2.boxFilter(I, cv2.CV_64F, (radius, radius))
+    mean_II = cv2.boxFilter(I * I, cv2.CV_64F, (radius, radius))
+
+    # Initialize output
+    q = np.zeros_like(p)
+
+    # Process each channel separately
+    for c in range(p.shape[2]):
+        mean_p = cv2.boxFilter(p[:, :, c], cv2.CV_64F, (radius, radius))
+        mean_Ip = cv2.boxFilter(I * p[:, :, c], cv2.CV_64F, (radius, radius))
+
+        # Step 2: Covariance of (I, p) and variance of I
+        cov_Ip = mean_Ip - mean_I * mean_p
+        var_I = mean_II - mean_I * mean_I
+
+        # Step 3: Calculate a and b
+        a = cov_Ip / (var_I + eps)
+        b = mean_p - a * mean_I
+
+        # Step 4: Mean of a and b
+        mean_a = cv2.boxFilter(a, cv2.CV_64F, (radius, radius))
+        mean_b = cv2.boxFilter(b, cv2.CV_64F, (radius, radius))
+
+        # Step 5: Output q for channel c
+        q[:, :, c] = mean_a * I + mean_b
+
+    return q
+
+
+def gamma_correction(img, gamma=0.5):
+    look_up_table = np.array([((i / 255.0) ** gamma) * 255 for i in range(256)]).astype(
+        "uint8"
+    )
+    if img.ndim == 3 and img.shape[2] == 3:  # RGB 이미지인 경우
+        channels = cv2.split(img)
+        corrected_channels = [cv2.LUT(channel, look_up_table) for channel in channels]
+        return cv2.merge(corrected_channels)
+    else:  # 단일 채널 이미지인 경우
+        return cv2.LUT(img, look_up_table)
