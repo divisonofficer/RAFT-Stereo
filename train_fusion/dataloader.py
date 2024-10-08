@@ -116,7 +116,7 @@ class EntityDataSet(data.Dataset):
     input_list: List[Entity]
 
     def __init__(self, input_list: List[Entity]):
-        self.input_list = input_list
+        self.input_list = random.sample(input_list, len(input_list))
 
     def __getitem__(self, index):
         return self.input_list[index].get_item()
