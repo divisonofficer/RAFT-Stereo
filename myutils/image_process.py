@@ -89,7 +89,7 @@ def guided_filter(I: np.ndarray, p: np.ndarray, radius=15, eps=1e-6):
         mean_b = cv2.boxFilter(b, cv2.CV_64F, (radius, radius))
 
         # Step 5: Output q for channel c
-        q[:, :, c] = mean_a * I + mean_b
+        q[:, :, c] = np.clip(mean_a * I + mean_b, 0, 255)
 
     return q
 

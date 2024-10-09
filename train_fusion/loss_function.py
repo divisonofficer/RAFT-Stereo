@@ -86,15 +86,13 @@ def warp_reproject_loss(
         # Compute the main loss
 
         ssim_loss = 1 - ssim(reproject, img_right, channel=img_right.shape[1]).mean()
-        l1_loss = F.l1_loss(reproject, img_right)
+        # l1_loss = F.l1_loss(reproject, img_right)
 
-        flow_loss += ((1 - loss_gamma) * ssim_loss + loss_gamma * l1_loss) * (
-            loss_beta ** (preds_cnt - i - 1)
-        )
+        flow_loss += ssim_loss * (loss_beta ** (preds_cnt - i - 1))
 
     return flow_loss, {
         "ssim_loss": ssim_loss.mean().item(),
-        "l1_loss": l1_loss.mean().item(),
+        # "l1_loss": l1_loss.mean().item(),
     }
 
 
@@ -154,31 +152,31 @@ def disparity_smoothness(disp, img):
 
     # Initialize disparity smoothness
     disp_smoothness = torch.Tensor([0.0]).to(disp[-1].device)
-    weight = 0.5
+    weight = 0.8
 
     # Loop over disparity scales and calculate smoothness
-    for scaled_disp in disp:
-        disp_smoothness += weight * get_disparity_smoothness(scaled_disp, img).mean()
-        weight /= 2.3  # Reduce weight for each scale
+    dis_len = len(disp)
+    for idx, scaled_disp in enumerate(disp):
+        disp_smoothness += (weight ** (dis_len - idx - 1)) * get_disparity_smoothness(
+            scaled_disp, img
+        ).mean()
+        # Reduce weight for each scale
 
-    return disp_smoothness.mean()
+    return disp_smoothness
 
 
 def self_supervised_loss(input, flow):
     image_viz_left, image_viz_right, image_nir_left, image_nir_right = input
 
-    loss, metric = warp_reproject_loss(flow, image_viz_left, image_viz_right)
-    loss2, metric_nir = warp_reproject_loss(flow, image_nir_left, image_nir_right)
+    image_left = torch.concat([image_viz_left, image_nir_left], dim=1)
+    image_right = torch.concat([image_viz_right, image_nir_right], dim=1)
 
-    for k, v in metric_nir.items():
-        metric[f"{k}_nir"] = v
-    loss += loss2
-    viz_smooth = disparity_smoothness(flow, image_viz_left)
-    nir_smooth = disparity_smoothness(flow, image_nir_left)
-    loss += viz_smooth + nir_smooth
-    metric["viz_smooth"] = viz_smooth.item()
-    metric["nir_smooth"] = nir_smooth.item()
+    loss, metric = warp_reproject_loss(flow, image_left, image_right)
 
+    disparity_smooth = disparity_smoothness(flow, image_left)
+
+    loss += disparity_smooth
+    metric["disp_smooth"] = disparity_smooth
     return loss.mean(), metric
 
 
@@ -222,8 +220,9 @@ def gt_loss(model, flow_gt, flow_preds, loss_gamma=0.9, max_flow=700):
     n_predictions = len(flow_preds)
     assert n_predictions >= 1
     flow_loss = 0.0
-    flow_gt = -flow_gt[0]
 
+    _, _, h, w = flow_preds[-1].shape
+    flow_gt = -flow_gt[:, :, :h, :w]
     for i in range(n_predictions):
         assert (
             not torch.isnan(flow_preds[i]).any()
@@ -231,11 +230,24 @@ def gt_loss(model, flow_gt, flow_preds, loss_gamma=0.9, max_flow=700):
         )
         # We adjust the loss_gamma so it is consistent for any number of RAFT-Stereo iterations
         if n_predictions > 1:
-            adjusted_loss_gamma = loss_gamma ** (15 / (n_predictions - 1))
-            i_weight = adjusted_loss_gamma ** (n_predictions - i - 1)
+            i_weight = loss_gamma ** (n_predictions - i - 1)
         else:
             i_weight = 1.0
-        i_loss = (flow_preds[i] - flow_gt).abs()
+        # print(flow_preds[i].shape, flow_gt.shape)
+        # i_loss = (flow_preds[i] - flow_gt[:, :, :h, :w]).abs()
+        flow_gt_cropped = flow_gt[:, :, :h, :w]
+        flow_pred_cropped = flow_preds[i][:, :, :h, :w]
+
+        # 마스크 생성: 모든 채널이 0보다 큰 픽셀
+        mask = flow_gt_cropped < 0
+
+        # 마스크된 L1 손실 계산
+        i_loss = (
+            F.l1_loss(flow_pred_cropped[mask], flow_gt_cropped[mask], reduction="mean")
+            if mask.any()
+            else torch.tensor(0.0, device=flow_gt.device)
+        )
+
         flow_loss += i_weight * i_loss.mean()
 
     epe = torch.sum((flow_preds[-1] - flow_gt) ** 2, dim=1).sqrt()

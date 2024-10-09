@@ -91,7 +91,7 @@ class EntityFlying3d(Entity):
 
         if self.guided_noise is not None:
             images[0] = guided_filter(images[2], images[0], self.guided_noise + 2, 1e-6)
-            images[1] = guided_filter(images[3], images[0], self.guided_noise + 2, 1e-6)
+            images[1] = guided_filter(images[3], images[1], self.guided_noise + 2, 1e-6)
         if self.gamma_noise is not None:
             images[0] = gamma_correction(
                 images[0], self.gamma_noise + random.random() + 0.1
@@ -211,17 +211,18 @@ class StereoDataset(EntityDataSet):
                     entry["rgb"][1].replace("frames_cleanpass", "nir_rendered"),
                 )
                 entry["nir"] = nir
+            nir_ambient = [x.replace("nir_rendered", "nir_ambient") for x in nir]
             if not self.args.synth_no_rgb:
                 self.entries.append(
                     EntityFlying3d([*entry["rgb"], *nir], entry["disparity"])
                 )
                 if self.args.noised_input:
-                    for _ in range(10):
+                    for _ in range(8):
                         self.entries.append(
                             EntityFlying3d(
-                                [*entry["rgb"], *nir],
+                                [*entry["rgb"], *nir_ambient],
                                 entry["disparity"],
-                                guided_noise=int((random.random() * 100) % 20),
+                                guided_noise=int((random.random() * 5) % 5),
                                 gamma_noise=(random.random() * 2),
                             )
                         )
@@ -251,12 +252,12 @@ class StereoDataset(EntityDataSet):
                     EntityFlying3d([*filtered, *nir], entry["disparity"])
                 )
                 if self.args.noised_input:
-                    for _ in range(3):
+                    for _ in range(2):
                         self.entries.append(
                             EntityFlying3d(
-                                [*filtered, *nir],
+                                [*filtered, *nir_ambient],
                                 entry["disparity"],
-                                guided_noise=int((random.random() * 100) % 20),
+                                guided_noise=int((random.random() * 5) % 5),
                                 gamma_noise=(random.random() * 2),
                             )
                         )
