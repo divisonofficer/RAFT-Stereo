@@ -69,7 +69,7 @@ class FusionBasicEncoder(nn.Module):
 
         self.fusion = AttentionFeatureFusion(output_dim, 4)
 
-    def forward(self, x_viz, x_nir):
+    def forward(self, x_viz, x_nir, debug_attention=False):
         is_list = isinstance(x_viz, tuple) or isinstance(x_viz, list)
         if is_list:
             batch_dim = x_viz[0].shape[0]
@@ -78,6 +78,8 @@ class FusionBasicEncoder(nn.Module):
 
         x_viz = self.encoder(x_viz)
         x_nir = self.encoder(x_nir) if self.shared_extractor else self.encoder2(x_nir)
+        if debug_attention:
+            return self.fusion(x_viz, x_nir, debug_attention=True)
         x = self.fusion(x_viz, x_nir)
         if is_list:
             x = x.split(split_size=batch_dim, dim=0)
@@ -306,9 +308,6 @@ class FusionMultiBasicEncoder(nn.Module):
             output_tupple += (v,)
 
         if attention_debug:
-            output_tupple += (
-                x_viz,
-                x_nir,
-            )
+            output_tupple += tuple(*self.fusion(x_viz, x_nir, debug_attention=True)[1:])
 
         return output_tupple

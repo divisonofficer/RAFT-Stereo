@@ -123,6 +123,7 @@ class RAFTStereoFusion(nn.Module):
             self.context_zqr_convs.eval()
         if "Updater" in self.args.freeze_backbone:
             self.update_block.eval()
+        self.freeze_bn()
 
     def extract_feature_map(
         self, inputs, spectral_feature=False, attention_debug=False
@@ -151,20 +152,13 @@ class RAFTStereoFusion(nn.Module):
                 )
             if attention_debug:
                 fmap1, fmap2 = x.split(dim=0, split_size=x.shape[0] // 2)
-                return (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
+                return fmap1, fmap1_rgb, fmap1_nir
         else:
+            if attention_debug:
+                return self.fnet(image_viz_left, image_nir_left, attention_debug=True)
             fmap1, fmap2 = self.fnet(
                 [image_viz_left, image_viz_right], [image_nir_left, image_nir_right]
             )
-
-            if attention_debug:
-                fmap1_rgb, fmap2_rgb = self.fnet.encoder(
-                    [image_viz_left, image_viz_right]
-                )
-                fmap1_nir, fmap2_nir = self.fnet.encoder(
-                    [image_nir_left, image_nir_right]
-                )
-                return (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
 
             cnet_list = self.cnet(
                 image_viz_left,
