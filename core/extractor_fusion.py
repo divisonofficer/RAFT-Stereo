@@ -63,9 +63,9 @@ class FusionBasicEncoder(nn.Module):
         self.norm_fn = norm_fn
         self.downsample = downsample
         self.shared_extractor = shared_extractor
-        self.encoder = BasicEncoder(output_dim, norm_fn, dropout, downsample)
+        self.encoder = BasicEncoder(output_dim, norm_fn, 3, dropout, downsample)
         if not shared_extractor:
-            self.encoder2 = BasicEncoder(output_dim, norm_fn, dropout, downsample)
+            self.encoder2 = BasicEncoder(output_dim, norm_fn, 3, dropout, downsample)
 
         self.fusion = AttentionFeatureFusion(output_dim, 4)
 
@@ -89,8 +89,6 @@ class FusionBasicEncoder(nn.Module):
         layer_list = [
             self.encoder,
         ]
-        if not self.shared_extractor:
-            layer_list.append(self.encoder2)
         for layer in layer_list:
             for param in layer.parameters():
                 param.requires_grad = False
@@ -266,8 +264,6 @@ class FusionMultiBasicEncoder(nn.Module):
             self.outputs16,
             self.outputs32,
         ]
-        # if not self.shared_extractor:
-        #     layer_list.append(self.encoder2)
         for layer in layer_list:
             for param in layer.parameters():
                 param.requires_grad = False
@@ -282,7 +278,7 @@ class FusionMultiBasicEncoder(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(
-        self, x_viz, x_nir, dual_inp=False, num_layers=3, attention_debug=False
+        self, x_viz, x_nir, dual_inp=False, num_layers=3, debug_attention=False
     ):
         x_viz = self.encoder(x_viz)
         x_nir = self.encoder(x_nir) if self.shared_extractor else self.encoder2(x_nir)
@@ -292,22 +288,26 @@ class FusionMultiBasicEncoder(nn.Module):
             x = x[: (x.shape[0] // 2)]
 
         outputs08 = [f(x) for f in self.outputs08]
-        output_tupple = (outputs08,)
+        output_tuple = (outputs08,)
 
         if num_layers >= 2:
             y = self.layer4(x)
             outputs16 = [f(y) for f in self.outputs16]
-            output_tupple += (outputs16,)
+            output_tuple += (outputs16,)
 
         if num_layers == 3:
             z = self.layer5(y)
             outputs32 = [f(z) for f in self.outputs32]
-            output_tupple += (outputs32,)
+            output_tuple += (outputs32,)
 
         if dual_inp:
-            output_tupple += (v,)
+            output_tuple += (v,)
 
-        if attention_debug:
-            output_tupple += tuple(*self.fusion(x_viz, x_nir, debug_attention=True)[1:])
+        if debug_attention:
+            x_rgb, x_nir = self.fusion(x_viz, x_nir, debug_attention=True)[1:]
+            output_tuple += (
+                x_rgb,
+                x_nir,
+            )
 
-        return output_tupple
+        return output_tuple

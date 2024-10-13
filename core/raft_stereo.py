@@ -58,7 +58,10 @@ class RAFTStereo(nn.Module):
             )
         else:
             self.fnet = BasicEncoder(
-                output_dim=256, norm_fn="instance", downsample=args.n_downsample
+                output_dim=256,
+                norm_fn="instance",
+                input_dim=input_channel,
+                downsample=args.n_downsample,
             )
 
     def freeze_bn(self):

@@ -126,36 +126,37 @@ class RAFTStereoFusion(nn.Module):
         self.freeze_bn()
 
     def extract_feature_map(
-        self, inputs, spectral_feature=False, attention_debug=False
+        self, inputs, spectral_feature=False, debug_attention=False
     ):
+        for i, f in enumerate(inputs):
+            if f.shape[1] == 1:
+                inputs[i] = f.repeat(1, 3, 1, 1)
         image_viz_left, image_viz_right, image_nir_left, image_nir_right = inputs
-        if image_nir_left.shape[1] == 1:
-            image_nir_left = image_nir_left.repeat(1, 3, 1, 1)
-            image_nir_right = image_nir_right.repeat(1, 3, 1, 1)
+
         if self.args.shared_backbone:
             cnet_output = self.cnet(
                 torch.cat((image_viz_left, image_viz_right), dim=0),
                 torch.cat((image_nir_left, image_nir_right), dim=0),
                 dual_inp=True,
                 num_layers=self.args.n_gru_layers,
-                attention_debug=attention_debug or spectral_feature,
+                debug_attention=debug_attention or spectral_feature,
             )
             *cnet_list, x = cnet_output[: (self.args.n_gru_layers + 1)]
             fmap1, fmap2 = self.conv2(x).split(dim=0, split_size=x.shape[0] // 2)
 
-            if spectral_feature or attention_debug:
+            if spectral_feature or debug_attention:
                 fmap1_rgb, fmap2_rgb = cnet_output[-2].split(
                     dim=0, split_size=x.shape[0] // 2
                 )
                 fmap1_nir, fmap2_nir = cnet_output[-1].split(
                     dim=0, split_size=x.shape[0] // 2
                 )
-            if attention_debug:
+            if debug_attention:
                 fmap1, fmap2 = x.split(dim=0, split_size=x.shape[0] // 2)
                 return fmap1, fmap1_rgb, fmap1_nir
         else:
-            if attention_debug:
-                return self.fnet(image_viz_left, image_nir_left, attention_debug=True)
+            if debug_attention:
+                return self.fnet(image_viz_left, image_nir_left, debug_attention=True)
             fmap1, fmap2 = self.fnet(
                 [image_viz_left, image_viz_right], [image_nir_left, image_nir_right]
             )
@@ -210,18 +211,15 @@ class RAFTStereoFusion(nn.Module):
         cnet_list: List[Tuple[torch.Tensor, torch.Tensor]]
         with autocast(enabled=self.args.mixed_precision):
             if attention_out_mode:
-                (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir) = (
-                    self.extract_feature_map(
-                        [
-                            image_viz_left,
-                            image_viz_right,
-                            image_nir_left,
-                            image_nir_right,
-                        ],
-                        attention_debug=True,
-                    )
+                return self.extract_feature_map(
+                    [
+                        image_viz_left,
+                        image_viz_right,
+                        image_nir_left,
+                        image_nir_right,
+                    ],
+                    debug_attention=True,
                 )
-                return (fmap1, fmap2), (fmap1_rgb, fmap2_rgb), (fmap1_nir, fmap2_nir)
             if inputs.spectral_feature:
                 (
                     fmap1,

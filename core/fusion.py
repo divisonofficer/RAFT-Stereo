@@ -74,8 +74,8 @@ class MultiScaleChannelAttentionModule(nn.Module):
 
     def forward(self, x):
         out = self.local_attention(x) + self.global_attention(x)
-        
-        out = self.sigmoid(out)
+
+        out = self.sigmoid(out) + 0.001
 
         return out
 
@@ -88,24 +88,45 @@ class AttentionFeatureFusion(nn.Module):
         self.attention_nir = MultiScaleChannelAttentionModule(in_channels, reduction)
 
         self.attention_fusion = MultiScaleChannelAttentionModule(in_channels, reduction)
-        
+
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, rgb, nir):
+    def forward(self, rgb, nir, debug_attention=False):
         # Apply the attention modules to the input features
         rgb_att = self.attention_rgb(rgb)
         nir_att = self.attention_nir(nir)
 
         # Concatenate the attention features
-        
-        rgb_att = rgb * rgb_att
-        nir_att = nir * nir_att
-        att_features = 2 * (rgb_att + nir_att)
+        sum_att = rgb_att + nir_att
+        rgb_att = rgb * rgb_att / sum_att * 2
+        nir_att = nir * nir_att / sum_att * 2
+        att_features = rgb_att + nir_att
 
         # Apply the attention fusion module
         att_fusion = self.attention_fusion(att_features)
 
-        out = att_fusion * rgb + (1 - att_fusion) * nir
+        out = att_fusion * rgb_att + (1 - att_fusion) * nir_att
+        if debug_attention:
+            return out, att_fusion * rgb_att, (1 - att_fusion) * nir_att
+        return out
+
+
+class IAttentionFeatureFusion(nn.Module):
+    def __init__(self, in_channels=128, reduction=16):
+        super(AttentionFeatureFusion, self).__init__()
+        self.attention_1 = MultiScaleChannelAttentionModule(in_channels, reduction)
+        self.attention_2 = MultiScaleChannelAttentionModule(in_channels, reduction)
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, rgb, nir):
+        # Apply the attention modules to the input features
+        att_1 = self.attention_1(rgb + nir)
+        rgb_att_1 = att_1 * rgb
+        nir_att_1 = (1 - att_1) * nir
+
+        att_2 = self.attention_2(rgb_att_1 + nir_att_1)
+        out = att_2 * rgb + (1 - att_2) * nir
 
         return out
 
