@@ -1,9 +1,11 @@
-from typing import Tuple
+from typing import Tuple, List
 import cv2
 import numpy as np
 import torch
 
 from myutils.matrix import rmse_loss
+from train_fusion.loss_function import reproject_disparity
+import torch.nn.functional as F
 
 
 def cv2toTensor(image: np.ndarray, batch_dim: bool = True):
@@ -57,6 +59,73 @@ def read_image_pair(
     return tuple(ret)
 
 
+def modify_v_channel_numpy_opencv(image_rgb, guide, alpha=0.5, beta=0.5):
+    """
+    RGB 이미지의 V 채널을 가이드 이미지로 수정하고 다시 RGB로 변환합니다.
+
+    Args:
+        image_rgb (numpy.ndarray): 입력 RGB 이미지, shape (h, w, 3), dtype=uint8 또는 float32/float64.
+                                   값의 범위는 [0, 255] (uint8) 또는 [0, 1] (float)으로 가정합니다.
+        guide (numpy.ndarray): 가이드 이미지, shape (h, w, 1), dtype=uint8 또는 float32/float64.
+                               값의 범위는 [0, 255] (uint8) 또는 [0, 1] (float)으로 가정합니다.
+        alpha (float, optional): V 채널에 대한 원본 이미지의 가중치. 기본값은 0.5.
+        beta (float, optional): V 채널에 대한 가이드 이미지의 가중치. 기본값은 0.5.
+
+    Returns:
+        numpy.ndarray: 수정된 RGB 이미지, shape (h, w, 3), dtype=uint8 또는 float32.
+    """
+    # 입력 이미지가 float일 경우 [0,1] 범위로 정규화되어 있다고 가정
+    is_float = False
+    if image_rgb.dtype in [np.float32, np.float64]:
+        is_float = True
+        image = (image_rgb * 255).astype(np.uint8)
+    else:
+        image = image_rgb.copy()
+
+    # 가이드 이미지도 동일하게 처리
+    if guide.dtype in [np.float32, np.float64]:
+        guide_normalized = guide * 255
+        guide_uint8 = guide_normalized.astype(np.uint8)
+    else:
+        guide_uint8 = guide.copy()
+
+    # RGB에서 HSV로 변환 (OpenCV는 기본적으로 BGR을 사용하므로 RGB를 BGR로 변환)
+    image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    image_hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+    # V 채널 수정
+    # V 채널은 OpenCV에서 0-255 범위를 가집니다
+    V = image_hsv[:, :, 2]
+
+    # 가이드 이미지도 동일한 스케일로 변환
+    if is_float:
+        I = guide_uint8.astype(np.float32)
+    else:
+        I = guide_uint8.astype(np.float32)
+
+    # V = alpha * V + beta * I
+    V_modified = alpha * V + beta * I.squeeze()  # 가이드 이미지의 채널 차원 제거
+
+    # V 채널 값 클램핑
+    V_modified = np.clip(V_modified, 0, 255)
+
+    # 수정된 V 채널을 HSV 이미지에 반영
+    image_hsv[:, :, 2] = V_modified
+
+    # HSV에서 BGR로 다시 변환
+    image_hsv = image_hsv.astype(np.uint8)
+    image_bgr_modified = cv2.cvtColor(image_hsv, cv2.COLOR_HSV2BGR)
+
+    # BGR을 다시 RGB로 변환
+    image_rgb_modified = cv2.cvtColor(image_bgr_modified, cv2.COLOR_BGR2RGB)
+
+    if is_float:
+        # 원래 float 형식으로 반환
+        image_rgb_modified = image_rgb_modified.astype(np.float32) / 255.0
+
+    return image_rgb_modified
+
+
 def guided_filter(I: np.ndarray, p: np.ndarray, radius=15, eps=1e-6):
     # I: guide image (grayscale)
     # p: input image to be filtered (color)
@@ -104,3 +173,275 @@ def gamma_correction(img, gamma=0.5):
         return cv2.merge(corrected_channels)
     else:  # 단일 채널 이미지인 경우
         return cv2.LUT(img, look_up_table)
+
+
+def input_reduce_disparity(inputs: list[torch.Tensor]):
+    shift = int(inputs[-1].min() // 16) * 16
+    if shift <= 0:
+        return inputs
+    warp_right = reproject_disparity(
+        -inputs[-1].unsqueeze(0) + shift, inputs[0].unsqueeze(0)
+    )[0]
+    warp_right_nir = reproject_disparity(
+        -inputs[-1].unsqueeze(0) + shift, inputs[2].unsqueeze(0)
+    )[0]
+    rolled_rgb_right = torch.roll(inputs[1], shifts=shift, dims=-1)
+    rolled_nir_right = torch.roll(inputs[3], shifts=shift, dims=-1)
+    rolled_rgb_right[..., :shift] = warp_right[..., :shift]
+    rolled_nir_right[..., :shift] = warp_right_nir[..., :shift]
+
+    inputs[-1] -= shift
+    inputs[-2][..., :2] -= shift
+    return [
+        inputs[0],
+        rolled_rgb_right,
+        inputs[2],
+        rolled_nir_right,
+        inputs[-2],
+        inputs[-1],
+    ]
+
+
+def crop_and_resize_height(image: torch.Tensor, h_to=360):
+    b, c, h, w = image.shape
+    cropped = image[:, :, :h_to, :]
+    resized = F.interpolate(
+        cropped,
+        size=(h, w),
+        mode="bilinear",
+    )
+    return resized
+
+
+def warp_left_to_right(
+    left: torch.Tensor, disparity: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    왼쪽 이미지를 disparity 맵을 기반으로 오른쪽 이미지로 워핑하고,
+    워핑된 영역에 대한 마스크를 생성합니다.
+
+    Args:
+        left (torch.Tensor): 왼쪽 이미지 텐서, 형상 (B, C, H, W)
+        disparity (torch.Tensor): disparity 맵 텐서, 형상 (B, 1, H, W)
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]:
+            - 워핑된 오른쪽 이미지, 형상 (B, C, H, W)
+            - 워핑 마스크, 형상 (B, 1, H, W)
+    """
+    B, C, H, W = left.size()
+
+    # 그리드 생성
+    device = left.device
+    dtype = left.dtype
+    grid_y, grid_x = torch.meshgrid(
+        torch.linspace(-1.0, 1.0, H, device=device, dtype=dtype),
+        torch.linspace(-1.0, 1.0, W, device=device, dtype=dtype),
+    )
+    grid = torch.stack((grid_x, grid_y), 2)  # Shape: (H, W, 2)
+    grid = grid.unsqueeze(0).repeat(B, 1, 1, 1)  # Shape: (B, H, W, 2)
+
+    # Disparity 정규화
+    disparity_norm = disparity.squeeze(1) * 2.0 / (W - 1)  # Shape: (B, H, W)
+
+    # x 좌표 조정 (오른쪽으로 워핑)
+    grid[:, :, :, 0] -= disparity_norm  # Shape: (B, H, W, 2)
+
+    # 오른쪽 이미지 워핑
+    warped_right = F.grid_sample(
+        left, grid, mode="bilinear", padding_mode="zeros", align_corners=True
+    )
+
+    # 마스크 생성
+    ones = torch.ones_like(disparity)
+    warped_mask = F.grid_sample(
+        ones, grid, mode="bilinear", padding_mode="zeros", align_corners=True
+    )
+
+    # 임계값을 기준으로 이진화 (예: 0.999 이상을 유효 영역으로)
+    mask = (warped_mask > 0.999).float()
+
+    return warped_right, mask
+
+
+def image_disparity_shift(
+    image: torch.Tensor,
+    disparity: torch.Tensor,
+    shift: int = 16,
+    is_disparity: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Disparity 기반으로 이미지를 오른쪽 또는 왼쪽으로 이동시키고,
+    이동된 영역에 대한 마스크를 생성합니다.
+
+    Args:
+        image (torch.Tensor): 입력 이미지 텐서, 형상 (B, C, H, W)
+        disparity (torch.Tensor): 불일치 맵 텐서, 형상 (B, 1, H, W)
+        shift (int): 최대 이동 픽셀 수 (양수는 오른쪽, 음수은 왼쪽)
+        is_disparity (bool): disparity 맵을 이동하는지 여부
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]:
+            - 이동된 이미지, 형상 (B, C, H, W)
+            - 이동 마스크, 형상 (B, 1, H, W)
+    """
+    N, C, H, W = image.shape
+
+    # Disparity 정규화 및 shift 맵 생성
+    disparity_max = disparity.max(dim=-1, keepdim=True)[0].max(dim=-2, keepdim=True)[0]
+    disparity_normalized = disparity / (disparity_max + 1e-8)  # Avoid division by zero
+    shift_map = disparity_normalized * shift  # Shape: (B, 1, H, W)
+
+    if is_disparity:
+        image = image - torch.abs(shift_map) * 2  # Example operation for disparity maps
+
+    # shift_map을 x 축으로 변환 (픽셀 단위 -> [-1, 1] 범위)
+    shift_normalized = (shift_map.squeeze(1) / (W - 1)) * 2  # Shape: (B, H, W)
+
+    # 기본 그리드 생성
+    theta = torch.zeros(N, 2, 3, device=image.device, dtype=image.dtype)
+    theta[:, 0, 0] = 1  # x 스케일
+    theta[:, 1, 1] = 1  # y 스케일
+    base_grid = F.affine_grid(
+        theta, image.size(), align_corners=True
+    )  # Shape: (B, H, W, 2)
+
+    # x 좌표에 shift 추가
+    grid = base_grid.clone()
+    grid_x = grid[..., 0] + shift_normalized  # Shape: (B, H, W)
+    grid_y = grid[..., 1]  # y는 변경하지 않음
+    grid = torch.stack((grid_x, grid_y), dim=-1)  # Shape: (B, H, W, 2)
+
+    # grid_sample을 사용하여 이미지 샘플링
+    image_shift = F.grid_sample(
+        image, grid, mode="bilinear", padding_mode="zeros", align_corners=True
+    )
+
+    # 마스크 생성
+    mask = F.grid_sample(
+        torch.ones_like(image[:, :1, :, :]),
+        grid,
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    )
+
+    return image_shift, mask
+
+
+def inputs_disparity_shift(
+    inputs: List[torch.Tensor], disparities: List[torch.Tensor], shift: int
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    """
+    주어진 입력 이미지와 disparity 맵을 기반으로 이미지를 이동 및 보정하고,
+    보정된 이미지와 disparity 맵을 반환합니다.
+
+    Args:
+        inputs (List[torch.Tensor]): 입력 이미지 리스트 [left_rgb, right_rgb, left_nir, right_nir]
+                                    각 텐서의 형상은 (B, C, H, W)
+        disparities (List[torch.Tensor]): disparity 맵 리스트 [disparity_map_left, disparity_map_right]
+                                          각 텐서의 형상은 (B, 1, H, W)
+        shift (int): 최대 이동 픽셀 수 (양수는 오른쪽, 음수은 왼쪽)
+
+    Returns:
+        Tuple[List[torch.Tensor], List[torch.Tensor]]:
+            - 보정된 이미지 리스트 [left_rgb_corrected, right_rgb_corrected, left_nir_corrected, right_nir_corrected]
+            - 보정된 disparity 맵 리스트 [disparity_map_left_corrected, disparity_map_right_corrected]
+    """
+    assert (
+        len(inputs) == 4
+    ), "inputs 리스트는 [left_rgb, right_rgb, left_nir, right_nir]의 4개 텐서를 가져야 합니다."
+    assert (
+        len(disparities) == 2
+    ), "disparities 리스트는 [disparity_map_left, disparity_map_right]의 2개 텐서를 가져야 합니다."
+
+    left_rgb, right_rgb, left_nir, right_nir = inputs
+    disparity_map_left, disparity_map_right = disparities
+
+    # 왼쪽 이미지와 disparity 맵을 이동
+    shift_left, warp_mask_left = image_disparity_shift(
+        left_rgb, disparity_map_left, shift=shift
+    )
+    shift_left_nir, _ = image_disparity_shift(left_nir, disparity_map_left, shift=shift)
+
+    # 왼쪽 disparity 맵 이동 (disparity 맵의 경우 is_disparity=True)
+    disparity_shift_left, _ = image_disparity_shift(
+        disparity_map_left.clone(), disparity_map_left, shift=shift, is_disparity=True
+    )
+
+    # 왼쪽 이미지를 오른쪽으로 워핑
+    shift_warp_right, _ = warp_left_to_right(shift_left, -disparity_shift_left)
+
+    # 오른쪽 이미지와 disparity 맵을 반대 방향으로 이동
+    shift_right, warp_mask_right = image_disparity_shift(
+        right_rgb, disparity_map_right, shift=-shift
+    )
+    shift_right_nir, _ = image_disparity_shift(
+        right_nir, disparity_map_right, shift=-shift
+    )
+
+    # 오른쪽 disparity 맵 이동
+    disparity_shift_right, _ = image_disparity_shift(
+        disparity_map_right.clone(),
+        disparity_map_right,
+        shift=-shift,
+        is_disparity=True,
+    )
+
+    # 오른쪽 이미지를 왼쪽으로 워핑
+    shift_warp_left, _ = warp_left_to_right(shift_right, disparity_shift_right)
+
+    # NIR 이미지 워핑
+    shift_warp_left_nir, _ = warp_left_to_right(shift_right_nir, disparity_shift_right)
+    shift_warp_right_nir, _ = warp_left_to_right(shift_left_nir, -disparity_shift_left)
+
+    # 이미지 보정: 마스크가 유효하지 않은 영역(<1)에서는 워핑된 이미지를 사용
+    # RGB 이미지
+    left_rgb_corrected = shift_left.clone()
+    right_rgb_corrected = shift_right.clone()
+
+    # 확장된 마스크를 사용하여 모든 채널에 적용
+    warp_mask_left_expanded = warp_mask_left.repeat(1, left_rgb_corrected.size(1), 1, 1)
+    warp_mask_right_expanded = warp_mask_right.repeat(
+        1, right_rgb_corrected.size(1), 1, 1
+    )
+
+    left_rgb_corrected[warp_mask_left_expanded < 1] = shift_warp_left[
+        warp_mask_left_expanded < 1
+    ]
+    right_rgb_corrected[warp_mask_right_expanded < 1] = shift_warp_right[
+        warp_mask_right_expanded < 1
+    ]
+
+    # NIR 이미지
+    left_nir_corrected = shift_left_nir.clone()
+    right_nir_corrected = shift_right_nir.clone()
+
+    # 마스크는 채널이 1이므로 repeat 필요 없음
+    left_nir_corrected[warp_mask_left < 1] = shift_warp_left_nir[warp_mask_left < 1]
+    right_nir_corrected[warp_mask_right < 1] = shift_warp_right_nir[warp_mask_right < 1]
+
+    # disparity 맵 보정
+    disparity_map_left_corrected = disparity_shift_left.clone()
+    disparity_map_right_corrected = disparity_shift_right.clone()
+
+    disparity_map_left_corrected[warp_mask_left < 1] = disparity_shift_right[
+        warp_mask_left < 1
+    ]
+    disparity_map_right_corrected[warp_mask_right < 1] = disparity_shift_left[
+        warp_mask_right < 1
+    ]
+
+    # 최종 보정된 이미지와 disparity 맵 리스트 생성
+    corrected_inputs = [
+        left_rgb_corrected,
+        right_rgb_corrected,
+        left_nir_corrected,
+        right_nir_corrected,
+    ]
+    corrected_disparities = [
+        disparity_map_left_corrected,
+        disparity_map_right_corrected,
+    ]
+
+    return corrected_inputs, corrected_disparities

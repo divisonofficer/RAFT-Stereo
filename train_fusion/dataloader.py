@@ -9,7 +9,12 @@ from PIL import Image
 import json
 
 import tqdm
-from myutils.image_process import gamma_correction, guided_filter
+from myutils.image_process import (
+    crop_and_resize_height,
+    gamma_correction,
+    guided_filter,
+    input_reduce_disparity,
+)
 import pfmread
 import cv2
 
@@ -43,11 +48,17 @@ class EntityFlying3d(Entity):
         disparity: List[str],
         guided_noise=None,
         gamma_noise=None,
+        shift_filter=False,
+        vertical_scale=False,
     ):
         self.images = images
         self.disparity = disparity
         self.guided_noise = guided_noise
         self.gamma_noise = gamma_noise
+        self.shift_filter = shift_filter
+        self.vertical_scale = vertical_scale
+
+        self.shift_distance = random.randint(4, 16)
 
     def __read_img(self, filename):
         if filename.endswith(".pfm"):
@@ -58,9 +69,13 @@ class EntityFlying3d(Entity):
             img.shape[0] != self.cut_resolution[0]
             or img.shape[1] != self.cut_resolution[1]
         ):
-            w_f = int(img.shape[1] / 2 - self.cut_resolution[1] / 2)
+            shift = 0
+            if self.shift_filter is not None:
+                shift = self.shift_distance
+                self.shift_distance = -shift
+            w_f = int(img.shape[1] / 2 - self.cut_resolution[1] / 2 + shift)
             h_f = int(img.shape[0] / 2 - self.cut_resolution[0] / 2)
-            w_t = int(img.shape[1] / 2 + self.cut_resolution[1] / 2)
+            w_t = int(img.shape[1] / 2 + self.cut_resolution[1] / 2 + shift)
             h_t = int(img.shape[0] / 2 + self.cut_resolution[0] / 2)
             img = img[h_f:h_t, w_f:w_t]
 
@@ -107,9 +122,34 @@ class EntityFlying3d(Entity):
         v = indices // self.cut_resolution[1]
 
         disparity = self.__to_tensor(self.disparity[0])
+
+        if self.shift_filter is not None:
+            disparity += self.shift_distance * 2
+            self.shift_distance = -self.shift_distance
+            disparity[disparity < 1e-4] = 1e-4
+
+        if self.vertical_scale:
+            images[0], images[1] = crop_and_resize_height(
+                torch.stack(images[:2], dim=0)
+            )
+            images[2], images[3] = crop_and_resize_height(
+                torch.stack(images[2:4], dim=0)
+            )
+            disparity = crop_and_resize_height(disparity.unsqueeze(0))[0]
+
         disparity_sampled = disparity[:, v, u]
         disparity_points = torch.stack((u, v, disparity_sampled[0]), dim=0).T.float()
-        return (images[0], images[1], images[2], images[3], disparity_points, disparity)
+
+        batch = [
+            images[0],
+            images[1],
+            images[2],
+            images[3],
+            disparity_points,
+            disparity,
+        ]
+
+        return batch
 
 
 class EntityDataSet(data.Dataset):
@@ -125,30 +165,6 @@ class EntityDataSet(data.Dataset):
         return len(self.input_list)
 
 
-class Entry:
-    def __init__(
-        self, rgb: Tuple[str, str], nir: Tuple[str, str], disparity: Optional[str]
-    ):
-        self.rgb = rgb
-        self.nir = nir
-        self.disparity = disparity
-
-    def __tuple__(self):
-        output = (*self.rgb, *self.nir)
-        if self.disparity is not None:
-            output += (*self.disparity,)
-        return output
-
-    def __from_tuple__(self, t):
-        self.rgb = t[:2]
-        self.nir = t[2:4]
-        self.disparity = t[4:5]
-        return self
-
-    def __key__(self):
-        return self.nir[0]
-
-
 class StereoDatasetArgs:
     def __init__(
         self,
@@ -160,6 +176,8 @@ class StereoDatasetArgs:
         synth_no_rgb=False,
         validate_json=False,
         noised_input=False,
+        shift_filter=False,
+        vertical_scale=False,
     ):
         self.folder = folder
         self.flow3d_driving_json = flow3d_driving_json
@@ -169,6 +187,8 @@ class StereoDatasetArgs:
         self.synth_no_rgb = synth_no_rgb
         self.fast_test = fast_test
         self.noised_input = noised_input
+        self.shift_filter = shift_filter
+        self.vertical_scale = vertical_scale
 
 
 class StereoDataset(EntityDataSet):
@@ -197,7 +217,9 @@ class StereoDataset(EntityDataSet):
             entries = json.load(file)
         self.entries: List[EntityFlying3d] = []
         validate_entries = []
+        error_cnt = 0
         for idx, entry in enumerate(tqdm.tqdm(entries)):
+
             if self.args.synth_no_filter and "frame_burnt_filtered" in entry:
                 continue
             if self.args.fast_test and idx > 100:
@@ -222,8 +244,10 @@ class StereoDataset(EntityDataSet):
                             EntityFlying3d(
                                 [*entry["rgb"], *nir_ambient],
                                 entry["disparity"],
-                                guided_noise=int((random.random() * 5) % 5),
+                                guided_noise=int((random.random() * 10) % 15),
                                 gamma_noise=(random.random() * 2),
+                                shift_filter=self.args.shift_filter,
+                                vertical_scale=self.args.vertical_scale,
                             )
                         )
 
@@ -257,8 +281,10 @@ class StereoDataset(EntityDataSet):
                             EntityFlying3d(
                                 [*filtered, *nir_ambient],
                                 entry["disparity"],
-                                guided_noise=int((random.random() * 5) % 5),
+                                guided_noise=int((random.random() * 100) % 15),
                                 gamma_noise=(random.random() * 2),
+                                shift_filter=self.args.shift_filter,
+                                vertical_scale=self.args.vertical_scale,
                             )
                         )
 
@@ -282,6 +308,7 @@ class StereoDataset(EntityDataSet):
                     validate_entries.append(entry)
 
         if validate:
+            print("Error Cnt ", error_cnt)
             with open(filename, "w") as file:
                 json.dump(validate_entries, file)
         return self.entries
