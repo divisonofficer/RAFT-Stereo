@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from core.raft_stereo_fusion import RAFTStereoFusion
+from train_fusion.ssim.utils import SSIM, warp
 
 
 def ssim(x, y, channel=1):
@@ -82,17 +83,25 @@ def warp_reproject_loss(
     img_right = img_right / 255.0
     # Apply ReLU to ensure disparity is non-negative
     for i, flow_pred in enumerate(flow_preds):
-        reproject = reproject_disparity(flow_pred, img_left)
-        # Compute the main loss
+        warp_right = warp(img_left, flow_pred)
+        mask = warp(torch.ones_like(img_left).to(img_left.device), flow_pred, "zeros")
+        ssim_loss = SSIM()(warp_right, img_right)
+        l1_loss = torch.abs(warp_right - img_right)
+        loss = (ssim_loss * 0.85 + 0.15 * l1_loss.mean(1, True))[mask > 0]
 
-        ssim_loss = 1 - ssim(reproject, img_right, channel=img_right.shape[1]).mean()
-        # l1_loss = F.l1_loss(reproject, img_right)
+        flow_loss += loss.mean() * (loss_beta ** (len(flow_preds) - i - 1))
 
-        flow_loss += ssim_loss * (loss_beta ** (preds_cnt - i - 1))
+        # reproject = reproject_disparity(flow_pred, img_left)
+        # # Compute the main loss
+
+        # ssim_loss = 1 - ssim(reproject, img_right, channel=img_right.shape[1]).mean()
+        # # l1_loss = F.l1_loss(reproject, img_right)
+
+        # flow_loss += ssim_loss * (loss_beta ** (preds_cnt - i - 1))
 
     return flow_loss, {
-        "ssim_loss": ssim_loss.mean().item(),
-        # "l1_loss": l1_loss.mean().item(),
+        "ssim_loss": ssim_loss[mask > 0].mean().item(),
+        "l1_loss": l1_loss[mask > 0].mean().item(),
     }
 
 
@@ -202,18 +211,6 @@ def self_fm_loss(model: RAFTStereoFusion, input, flow):
     return loss, metric
 
 
-def warp(im, disp, grid_size=2):
-    theta = torch.Tensor(np.array([[1, 0, 0], [0, 1, 0]])).cuda()
-    theta = theta.expand((disp.size()[0], 2, 3)).contiguous()
-    grid = F.affine_grid(theta, disp.size())
-    disp = disp.transpose(1, 2).transpose(2, 3)
-    disp = torch.cat((disp, torch.zeros(disp.size()).cuda()), 3)
-
-    grid = grid + 2 * disp
-    sampled = F.grid_sample(im, grid)
-    return sampled
-
-
 def gt_loss(model, flow_gt, flow_preds, loss_gamma=0.9, max_flow=700):
     """Loss function defined over sequence of flow predictions"""
 
@@ -239,7 +236,7 @@ def gt_loss(model, flow_gt, flow_preds, loss_gamma=0.9, max_flow=700):
         flow_pred_cropped = flow_preds[i][:, :, :h, :w]
 
         # 마스크 생성: 모든 채널이 0보다 큰 픽셀
-        mask = flow_gt_cropped < 0
+        mask = flow_gt_cropped <= 0
 
         # 마스크된 L1 손실 계산
         i_loss = (

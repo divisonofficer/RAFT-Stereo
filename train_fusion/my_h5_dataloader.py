@@ -26,9 +26,10 @@ from train_fusion.dataloader import Entity, EntityDataSet
 
 
 class MyH5Entity(Entity):
-    def __init__(self, h5_path, frame_path):
+    def __init__(self, h5_path, frame_path, shift: Optional[int] = None):
         self.h5_path = h5_path
         self.frame_path = frame_path
+        self.shift = shift
 
     def imread(self, path: str, gray=False):
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE if gray else cv2.IMREAD_ANYCOLOR)
@@ -85,26 +86,32 @@ class MyH5Entity(Entity):
             )
 
             lidar_projected_points = pad_lidar_points(lidar_projected_points, 5000)
+            # disparity = frame["depth_bpnet/near"][:][:540, :720]
+            # disparity = torch.from_numpy(disparity).unsqueeze(0)
+            # disparity[disparity > 64] = 0
+            # monodepth_rgb = frame["depth_mono/rgb"][:].squeeze()
+            # monodepth_nir = frame["depth_mono/nir"][:].squeeze()
+            disparity = np.zeros((540, 720), np.float32) - 1
+            # disparity = refine_disparity_with_monodepth(disparity, monodepth_nir)
 
-            disparity_rgb = frame["disparity/rgb"][:].squeeze()[:540, :720]
-            disparity_nir = frame["disparity/nir"][:].squeeze()[:540, :720]
-            monodepth_rgb = frame["depth_mono/rgb"][:].squeeze()
-            monodepth_nir = frame["depth_mono/nir"][:].squeeze()
-            disparity_rgb = refine_disparity_with_monodepth(
-                disparity_rgb, monodepth_rgb
-            )
-            rgb_left = cv2.imread(
-                os.path.join(frame_path, "rgb", "left.png"), cv2.IMREAD_COLOR
-            )
-            nir_left = cv2.imread(
-                os.path.join(frame_path, "nir", "left.png"), cv2.IMREAD_GRAYSCALE
-            )
-            disparity_nir = refine_disparity_with_monodepth(
-                disparity_nir, monodepth_nir
-            )
-            disparity = combine_disparity_by_edge(
-                lidar_projected_points, disparity_rgb, disparity_nir, rgb_left, nir_left
-            )
+            # disparity_rgb = frame["disparity/rgb"][:].squeeze()[:540, :720]
+            # disparity_nir = frame["disparity/nir"][:].squeeze()[:540, :720]
+            #
+            # disparity_rgb = refine_disparity_with_monodepth(
+            #     disparity_rgb, monodepth_rgb
+            # )
+            # rgb_left = cv2.imread(
+            #     os.path.join(frame_path, "rgb", "left.png"), cv2.IMREAD_COLOR
+            # )
+            # nir_left = cv2.imread(
+            #     os.path.join(frame_path, "nir", "left.png"), cv2.IMREAD_GRAYSCALE
+            # )
+            # disparity_nir = refine_disparity_with_monodepth(
+            #     disparity_nir, monodepth_nir
+            # )
+            # disparity = combine_disparity_by_edge(
+            #     lidar_projected_points, disparity_rgb, disparity_nir, rgb_left, nir_left
+            # )
             disparity = torch.from_numpy(disparity).unsqueeze(-1).permute(2, 0, 1)
 
         lidar_projected_points = torch.from_numpy(lidar_projected_points).float()
@@ -116,6 +123,11 @@ class MyH5Entity(Entity):
         rgb_right = self.imread(os.path.join(frame_path, "rgb", "right.png"))
         nir_left = self.imread(os.path.join(frame_path, "nir", "left.png"), gray=True)
         nir_right = self.imread(os.path.join(frame_path, "nir", "right.png"), gray=True)
+
+        if self.shift is not None:
+            rgb_right = torch.roll(rgb_right, shifts=-self.shift, dims=-1)
+            nir_right = torch.roll(nir_right, shifts=-self.shift, dims=-1)
+            lidar_projected_points[:, 2] += self.shift
 
         return (
             rgb_left,
@@ -129,23 +141,43 @@ class MyH5Entity(Entity):
 
 class MyH5DataSet(EntityDataSet):
     def __init__(
-        self, root="/bean/depth", fast_test=False, frame_cache=False, update_cache=False
+        self,
+        root="/bean/depth",
+        fast_test=False,
+        frame_cache=False,
+        update_cache=False,
+        use_right_shift=False,
     ):
         self.transform_mtx = np.load("jai_transform.npy")
         self.frame_cache = frame_cache
         self.update_cache = update_cache
+        self.use_right_shift = use_right_shift
         ## find h5 files
         h5files = self.find_h5_files(root)
-
+        h5files.sort()
         ## read h5 files and get frame_id list
         frame_id_list: List[MyH5Entity] = []
         for h5file in tqdm(h5files):
-            frame_id_list += list(self.read_h5_file(h5file))
+            try:
+                frame_id_list += list(self.read_h5_file(h5file))
+            except OSError:
+                print(f"{h5file} is not prepared yet")
+                break
 
             if fast_test and len(frame_id_list) > 100:
                 break
-        frame_id_list = random.sample(frame_id_list, len(frame_id_list))
-        self.input_list = frame_id_list
+
+        self.input_list = []
+        for entity in tqdm(frame_id_list):
+            self.input_list.append(entity)
+            if self.use_right_shift:
+                self.input_list.append(
+                    MyH5Entity(
+                        entity.h5_path, entity.frame_path, random.randint(16, 40)
+                    )
+                )
+
+        self.input_list = random.sample(self.input_list, len(self.input_list))
 
     def __len__(self):
         return len(self.input_list)
@@ -163,6 +195,7 @@ class MyH5DataSet(EntityDataSet):
 
     def read_h5_file(self, h5_file):
         frame_id_ret: List[MyH5Entity] = []
+        id_cache: List[Tuple[str, str]] = []
         with h5py.File(h5_file, "a" if self.update_cache else "r", swmr=True) as f:
             if self.frame_cache and "frame_ids" in f:
                 frame_ids = f["frame_ids"][:]
@@ -174,15 +207,26 @@ class MyH5DataSet(EntityDataSet):
                 if "disparity" in frame:
                     if "align_error" in frame.attrs and frame.attrs["align_error"]:
                         continue
+                    if (
+                        "exposure_error" in frame.attrs
+                        and frame.attrs["exposure_error"]
+                    ):
+                        continue
                     frame_id_ret.append(
                         MyH5Entity(
                             h5_file, os.path.join(os.path.dirname(h5_file), frame_id)
                         )
                     )
+                    id_cache.append(
+                        (
+                            h5_file,
+                            os.path.join(os.path.dirname(h5_file), frame_id),
+                        )
+                    )
             if self.update_cache:
                 if "frame_ids" in f:
                     del f["frame_ids"]
-                f.create_dataset("frame_ids", data=frame_id_ret)
+                f.create_dataset("frame_ids", data=id_cache)
             f.close()
         return frame_id_ret
 

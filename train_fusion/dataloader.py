@@ -1,6 +1,6 @@
 import os
 import random
-from typing import List, Optional, Tuple, Union
+from typing import List, Literal, Optional, Tuple, Union
 import torch
 import torch.utils.data as data
 import numpy as np
@@ -14,6 +14,7 @@ from myutils.image_process import (
     gamma_correction,
     guided_filter,
     input_reduce_disparity,
+    inputs_disparity_shift,
 )
 import pfmread
 import cv2
@@ -50,6 +51,7 @@ class EntityFlying3d(Entity):
         gamma_noise=None,
         shift_filter=False,
         vertical_scale=False,
+        noise_target: Literal["rgb", "nir"] = "rgb",
     ):
         self.images = images
         self.disparity = disparity
@@ -57,7 +59,7 @@ class EntityFlying3d(Entity):
         self.gamma_noise = gamma_noise
         self.shift_filter = shift_filter
         self.vertical_scale = vertical_scale
-
+        self.noise_target = noise_target
         self.shift_distance = random.randint(4, 16)
 
     def __read_img(self, filename):
@@ -69,13 +71,9 @@ class EntityFlying3d(Entity):
             img.shape[0] != self.cut_resolution[0]
             or img.shape[1] != self.cut_resolution[1]
         ):
-            shift = 0
-            if self.shift_filter is not None:
-                shift = self.shift_distance
-                self.shift_distance = -shift
-            w_f = int(img.shape[1] / 2 - self.cut_resolution[1] / 2 + shift)
+            w_f = int(img.shape[1] / 2 - self.cut_resolution[1] / 2)
             h_f = int(img.shape[0] / 2 - self.cut_resolution[0] / 2)
-            w_t = int(img.shape[1] / 2 + self.cut_resolution[1] / 2 + shift)
+            w_t = int(img.shape[1] / 2 + self.cut_resolution[1] / 2)
             h_t = int(img.shape[0] / 2 + self.cut_resolution[0] / 2)
             img = img[h_f:h_t, w_f:w_t]
 
@@ -105,15 +103,42 @@ class EntityFlying3d(Entity):
         images = [self.__read_img(img) for img in self.images]
 
         if self.guided_noise is not None:
-            images[0] = guided_filter(images[2], images[0], self.guided_noise + 2, 1e-6)
-            images[1] = guided_filter(images[3], images[1], self.guided_noise + 2, 1e-6)
+            if self.noise_target == "rgb":
+                images[0] = guided_filter(
+                    images[2], images[0], self.guided_noise + 2, 1e-6
+                )
+                images[1] = guided_filter(
+                    images[3], images[1], self.guided_noise + 2, 1e-6
+                )
+            else:
+                images[2] = guided_filter(
+                    images[0].mean(axis=-1),
+                    images[2][..., np.newaxis],
+                    self.guided_noise + 5,
+                    1e-6,
+                )
+                images[3] = guided_filter(
+                    images[1].mean(axis=-1),
+                    images[3][..., np.newaxis],
+                    self.guided_noise + 5,
+                    1e-6,
+                )
+
         if self.gamma_noise is not None:
-            images[0] = gamma_correction(
-                images[0], self.gamma_noise + random.random() + 0.1
-            )
-            images[1] = gamma_correction(
-                images[1], self.gamma_noise + random.random() + 0.1
-            )
+            if self.noise_target == "rgb":
+                images[0] = gamma_correction(
+                    images[0], self.gamma_noise + random.random() + 0.1
+                )
+                images[1] = gamma_correction(
+                    images[1], self.gamma_noise + random.random() + 0.1
+                )
+            else:
+                images[2] = gamma_correction(
+                    images[2], self.gamma_noise + random.random() * 2 + 0.1
+                )
+                images[3] = gamma_correction(
+                    images[3], self.gamma_noise + random.random() * 2 + 0.1
+                )
 
         images = [self.__to_tensor(img) for img in images]
 
@@ -123,10 +148,15 @@ class EntityFlying3d(Entity):
 
         disparity = self.__to_tensor(self.disparity[0])
 
-        if self.shift_filter is not None:
-            disparity += self.shift_distance * 2
-            self.shift_distance = -self.shift_distance
-            disparity[disparity < 1e-4] = 1e-4
+        if self.shift_filter:
+            disparity_right = self.__to_tensor(self.disparity[1])
+            images, (disparity, _) = inputs_disparity_shift(
+                [x.unsqueeze(0) for x in images],
+                [disparity.unsqueeze(0), disparity_right.unsqueeze(0)],
+                random.randint(8, 32),
+            )
+            images = [x[0] for x in images]
+            disparity = disparity[0]
 
         if self.vertical_scale:
             images[0], images[1] = crop_and_resize_height(
@@ -239,17 +269,19 @@ class StereoDataset(EntityDataSet):
                     EntityFlying3d([*entry["rgb"], *nir], entry["disparity"])
                 )
                 if self.args.noised_input:
-                    for _ in range(8):
-                        self.entries.append(
-                            EntityFlying3d(
-                                [*entry["rgb"], *nir_ambient],
-                                entry["disparity"],
-                                guided_noise=int((random.random() * 10) % 15),
-                                gamma_noise=(random.random() * 2),
-                                shift_filter=self.args.shift_filter,
-                                vertical_scale=self.args.vertical_scale,
+                    for _ in range(5):
+                        for t in ["rgb", "nir"]:
+                            self.entries.append(
+                                EntityFlying3d(
+                                    [*entry["rgb"], *nir_ambient],
+                                    entry["disparity"],
+                                    guided_noise=int((random.random() * 100) % 20),
+                                    gamma_noise=(random.random() * 2),
+                                    shift_filter=self.args.shift_filter,
+                                    vertical_scale=self.args.vertical_scale,
+                                    noise_target=t,
+                                )
                             )
-                        )
 
             for filter in [
                 "frame_burnt_filtered",
@@ -277,16 +309,18 @@ class StereoDataset(EntityDataSet):
                 )
                 if self.args.noised_input:
                     for _ in range(2):
-                        self.entries.append(
-                            EntityFlying3d(
-                                [*filtered, *nir_ambient],
-                                entry["disparity"],
-                                guided_noise=int((random.random() * 100) % 15),
-                                gamma_noise=(random.random() * 2),
-                                shift_filter=self.args.shift_filter,
-                                vertical_scale=self.args.vertical_scale,
+                        for t in ["rgb", "nir"]:
+                            self.entries.append(
+                                EntityFlying3d(
+                                    [*filtered, *nir_ambient],
+                                    entry["disparity"],
+                                    guided_noise=int((random.random() * 100) % 20),
+                                    gamma_noise=(random.random() * 2),
+                                    shift_filter=self.args.shift_filter,
+                                    vertical_scale=self.args.vertical_scale,
+                                    noise_target=t,
+                                )
                             )
-                        )
 
             if validate:
                 validated = True
