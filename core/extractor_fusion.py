@@ -58,6 +58,7 @@ class FusionBasicEncoder(nn.Module):
         dropout=0.0,
         downsample=3,
         shared_extractor=False,
+        fusion_module=AttentionFeatureFusion,
     ):
         super(FusionBasicEncoder, self).__init__()
         self.norm_fn = norm_fn
@@ -67,7 +68,7 @@ class FusionBasicEncoder(nn.Module):
         if not shared_extractor:
             self.encoder2 = BasicEncoder(output_dim, norm_fn, 3, dropout, downsample)
 
-        self.fusion = AttentionFeatureFusion(output_dim, 4)
+        self.fusion = fusion_module(output_dim, 4)
 
     def forward(self, x_viz, x_nir, debug_attention=False):
         is_list = isinstance(x_viz, tuple) or isinstance(x_viz, list)

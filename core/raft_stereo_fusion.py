@@ -18,7 +18,12 @@ from fusion_args import FusionArgs
 
 autocast = torch.cuda.amp.autocast
 
-from core.fusion import AttentionFeatureFusion, ConcatFusion
+from core.fusion import (
+    AttentionFeatureFusion,
+    BAttentionFeatureFusion,
+    ConcatFusion,
+    IAttentionFeatureFusion,
+)
 
 
 class RAFTStereoFusion(nn.Module):
@@ -59,6 +64,7 @@ class RAFTStereoFusion(nn.Module):
                 norm_fn="instance",
                 downsample=args.n_downsample,
                 shared_extractor=args.shared_fusion,
+                fusion_module=self.define_fusion_layer(),
             )
 
     def define_fusion_layer(self):
@@ -66,12 +72,17 @@ class RAFTStereoFusion(nn.Module):
             return AttentionFeatureFusion
         if self.args.fusion == "ConCat":
             return ConcatFusion
+        if self.args.fusion == "iAFF":
+            return IAttentionFeatureFusion
+        if self.args.fusion == "bAFF":
+            return BAttentionFeatureFusion
         return AttentionFeatureFusion
 
     def freeze_bn(self):
         for m in self.modules():
             if isinstance(m, nn.BatchNorm2d):
                 m.eval()
+                m.requires_grad_(False)
 
     def rgb2NIR(self, rgb):
         # Reverse the channels and use torch.maximum
@@ -121,8 +132,12 @@ class RAFTStereoFusion(nn.Module):
                 self.fnet.freeze_raft()
         if "Volume" in self.args.freeze_backbone:
             self.context_zqr_convs.eval()
+            for name, param in self.context_zqr_convs.named_parameters():
+                param.requires_grad = False
         if "Updater" in self.args.freeze_backbone:
             self.update_block.eval()
+            for name, param in self.update_block.named_parameters():
+                param.requires_grad = False
         self.freeze_bn()
 
     def extract_feature_map(
