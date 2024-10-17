@@ -17,6 +17,7 @@ from myutils.points import (
     pad_lidar_points,
     project_points_on_camera,
     refine_disparity,
+    refine_disparity_points,
     refine_disparity_with_monodepth,
     transform_point_inverse,
 )
@@ -26,10 +27,13 @@ from train_fusion.dataloader import Entity, EntityDataSet
 
 
 class MyH5Entity(Entity):
-    def __init__(self, h5_path, frame_path, shift: Optional[int] = None):
+    def __init__(
+        self, h5_path, frame_path, shift: Optional[int] = None, is_refined_gt=False
+    ):
         self.h5_path = h5_path
         self.frame_path = frame_path
         self.shift = shift
+        self.is_refined_gt = is_refined_gt
 
     def imread(self, path: str, gray=False):
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE if gray else cv2.IMREAD_ANYCOLOR)
@@ -84,6 +88,9 @@ class MyH5Entity(Entity):
             lidar_projected_points[:, 2] = (
                 focal_length * baseline / lidar_projected_points[:, 2] - 1
             )
+            lidar_projected_points = refine_disparity_points(
+                torch.from_numpy(lidar_projected_points),
+            ).numpy()
 
             lidar_projected_points = pad_lidar_points(lidar_projected_points, 5000)
             # disparity = frame["depth_bpnet/near"][:][:540, :720]
@@ -91,7 +98,12 @@ class MyH5Entity(Entity):
             # disparity[disparity > 64] = 0
             # monodepth_rgb = frame["depth_mono/rgb"][:].squeeze()
             # monodepth_nir = frame["depth_mono/nir"][:].squeeze()
-            disparity = np.zeros((540, 720), np.float32) - 1
+            if self.is_refined_gt:
+                disparity = frame["disparity/bpnet"][:] + (
+                    self.shift if self.shift is not None else 0
+                )
+            else:
+                disparity = np.zeros((540, 720), np.float32) - 1
             # disparity = refine_disparity_with_monodepth(disparity, monodepth_nir)
 
             # disparity_rgb = frame["disparity/rgb"][:].squeeze()[:540, :720]
@@ -139,6 +151,33 @@ class MyH5Entity(Entity):
         )
 
 
+class MyRefinedH5DataSet(EntityDataSet):
+    def __init__(self, root="/bean/depth/refined", use_right_shift=False):
+        self.transform_mtx = np.load("jai_transform.npy")
+        self.use_right_shift = use_right_shift
+        frame_id_ret: List[MyH5Entity] = []
+        h5_file = os.path.join(root, "0.hdf5")
+        with h5py.File(h5_file, "r", swmr=True) as f:
+            frame_ids = list(f["frame"].keys())
+            for frame_id in frame_ids:
+                frame = f.require_group(f"frame/{frame_id}")
+                if "disparity" in frame:
+                    for _ in range(10):
+                        frame_id_ret.append(
+                            MyH5Entity(
+                                h5_file,
+                                os.path.join(os.path.dirname(h5_file), frame_id),
+                                (
+                                    random.randint(0, 36)
+                                    if self.use_right_shift
+                                    else None
+                                ),
+                                is_refined_gt=True,
+                            )
+                        )
+        self.input_list = random.sample(frame_id_ret, len(frame_id_ret))
+
+
 class MyH5DataSet(EntityDataSet):
     def __init__(
         self,
@@ -173,7 +212,7 @@ class MyH5DataSet(EntityDataSet):
             if self.use_right_shift:
                 self.input_list.append(
                     MyH5Entity(
-                        entity.h5_path, entity.frame_path, random.randint(16, 40)
+                        entity.h5_path, entity.frame_path, random.randint(24, 36)
                     )
                 )
 
@@ -210,6 +249,11 @@ class MyH5DataSet(EntityDataSet):
                     if (
                         "exposure_error" in frame.attrs
                         and frame.attrs["exposure_error"]
+                    ):
+                        continue
+                    if (
+                        "lidar_align_error" in frame.attrs
+                        and frame.attrs["lidar_align_error"]
                     ):
                         continue
                     frame_id_ret.append(

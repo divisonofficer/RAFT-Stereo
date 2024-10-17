@@ -1,11 +1,57 @@
+import random
 from typing import Tuple, List
 import cv2
 import numpy as np
 import torch
 
 from myutils.matrix import rmse_loss
-from train_fusion.loss_function import reproject_disparity
+
 import torch.nn.functional as F
+
+
+def reproject_disparity(
+    disparity_map: torch.Tensor, left_image: torch.Tensor, max_disparity=128
+):
+    batch_size, channels, height, width = left_image.shape
+    # Create a mesh grid for pixel coordinates
+    x_coords, y_coords = torch.meshgrid(
+        torch.arange(width, device=left_image.device),
+        torch.arange(height, device=left_image.device),
+        indexing="xy",
+    )
+
+    x_coords = x_coords.unsqueeze(0).expand(batch_size, -1, -1).float()
+    y_coords = y_coords.unsqueeze(0).expand(batch_size, -1, -1).float()
+
+    # Compute the new x coordinates based on disparity
+    disparity_map = F.pad(
+        disparity_map, (1, 1, 1, 1), mode="constant", value=0
+    )  # Pad to handle boundary
+    disparity_map = F.interpolate(
+        disparity_map, size=(height, width), mode="bilinear", align_corners=False
+    )  # Resample disparity map
+
+    # Convert disparity map to float type
+    disparity_map = disparity_map.squeeze(1)
+
+    x_new_coords = x_coords - disparity_map
+    y_new_coords = y_coords
+
+    # Create grid tensor with shape [N, H, W, 2]
+    grid = torch.stack([x_new_coords, y_new_coords], dim=-1)
+
+    # Normalize the grid to the range [-1, 1]
+    grid = (
+        2.0 * grid / torch.tensor([width - 1, height - 1], device=left_image.device)
+        - 1.0
+    )
+
+    # Perform bilinear interpolation for the reprojected image
+    reprojected_image = F.grid_sample(
+        left_image, grid, mode="bilinear", align_corners=False
+    )
+
+    return reprojected_image
 
 
 def cv2toTensor(image: np.ndarray, batch_dim: bool = True):
@@ -163,16 +209,101 @@ def guided_filter(I: np.ndarray, p: np.ndarray, radius=15, eps=1e-6):
     return q
 
 
-def gamma_correction(img, gamma=0.5):
-    look_up_table = np.array([((i / 255.0) ** gamma) * 255 for i in range(256)]).astype(
-        "uint8"
+def gamma_correction_torch(img, gamma=0.5):
+    look_up_table = torch.tensor(
+        [((i / 255.0) ** gamma) * 255 for i in range(256)],
+        dtype=torch.float32,
+        device=img.device,
     )
-    if img.ndim == 3 and img.shape[2] == 3:  # RGB 이미지인 경우
-        channels = cv2.split(img)
-        corrected_channels = [cv2.LUT(channel, look_up_table) for channel in channels]
-        return cv2.merge(corrected_channels)
-    else:  # 단일 채널 이미지인 경우
-        return cv2.LUT(img, look_up_table)
+    img_corrected = torch.take(look_up_table, img.long())
+    return img_corrected
+
+
+def apply_local_gamma_correction_torch(img, gamma=0.5, kernel_size=101, sigma=15):
+    """
+    Applies gamma correction locally using a Gaussian mask.
+
+    Parameters:
+    - img: Input image (torch tensor).
+    - gamma: Gamma value for correction.
+    - kernel_size: Size of the Gaussian kernel (must be odd).
+    - sigma: Standard deviation for Gaussian kernel.
+
+    Returns:
+    - Image with local gamma correction applied.
+    """
+    # Ensure kernel size is odd
+    h, w = img.shape[-2:]
+    if kernel_size >= min(h, w):
+        kernel_size = min(h, w) - 2
+
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+
+    # Create a Gaussian mask with values between 0 and 1
+    x = (
+        torch.arange(kernel_size, dtype=torch.float32, device=img.device)
+        - kernel_size // 2
+    )
+    gaussian_1d = torch.exp(-0.5 * (x / sigma) ** 2)
+    gaussian_2d = torch.outer(gaussian_1d, gaussian_1d)
+    gaussian_2d = gaussian_2d / torch.max(gaussian_2d)
+
+    # Resize the mask to match the image size if necessary
+    gaussian_mask = F.interpolate(
+        gaussian_2d.unsqueeze(0).unsqueeze(0),
+        size=(h, w),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze()
+
+    # Expand mask to have same number of channels as image
+    if img.ndim == 4:  # Batch size included
+        gaussian_mask = gaussian_mask.unsqueeze(0).expand(
+            img.shape[0], img.shape[1], -1, -1
+        )
+    elif img.ndim == 3:
+        gaussian_mask = gaussian_mask.expand_as(img)
+
+    # Apply gamma correction to the entire image
+    gamma_corrected = gamma_correction_torch(img, gamma)
+
+    # Blending: result = mask * gamma_corrected + (1 - mask) * original
+    blended = gaussian_mask * gamma_corrected + (1.0 - gaussian_mask) * img.float()
+
+    # Clip the values to [0, 255] and convert back to uint8
+    blended = torch.clamp(blended, 0, 255).byte()
+
+    return blended
+
+
+def apply_patch_gamma_correction_torch(img, p=256):
+    if img.ndim == 3:
+        img = img.unsqueeze(0)
+    if img.shape[1] == 1:
+        img = img.expand(-1, 3, -1, -1)
+        nir = True
+    else:
+        nir = False
+
+    # Pad the image
+    img = F.pad(img, (p // 2, p // 2, p // 2, p // 2))
+
+    b, c, h, w = img.shape
+    for _ in range(20):
+        x = random.randint(0, max(w - p, 0))
+        y = random.randint(0, max(h - p, 0))
+        img[:, :, y : y + p, x : x + p] = apply_local_gamma_correction_torch(
+            img[:, :, y : y + p, x : x + p],
+            gamma=10 ** (-4 + (random.random() * 8)),
+            kernel_size=101,
+            sigma=20,
+        )
+
+    img = img[:, :, p // 2 : -p // 2, p // 2 : -p // 2]
+    if nir:
+        return img[:, :1]
+    return img
 
 
 def input_reduce_disparity(inputs: list[torch.Tensor]):

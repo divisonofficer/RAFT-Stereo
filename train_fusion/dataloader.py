@@ -10,8 +10,8 @@ import json
 
 import tqdm
 from myutils.image_process import (
+    apply_patch_gamma_correction_torch,
     crop_and_resize_height,
-    gamma_correction,
     guided_filter,
     input_reduce_disparity,
     inputs_disparity_shift,
@@ -105,42 +105,45 @@ class EntityFlying3d(Entity):
         if self.guided_noise is not None:
             if self.noise_target == "rgb":
                 images[0] = guided_filter(
-                    images[2], images[0], self.guided_noise + 2, 1e-6
+                    images[2], images[0], self.guided_noise * 5 + 2, 1e-6
                 )
                 images[1] = guided_filter(
-                    images[3], images[1], self.guided_noise + 2, 1e-6
+                    images[3], images[1], self.guided_noise * 5 + 2, 1e-6
                 )
+                if random.randint(1, 4) == 1:
+                    images[0] = images[0] // 50
+                    images[1] = images[1] // 50
             else:
                 images[2] = guided_filter(
                     images[0].mean(axis=-1),
                     images[2][..., np.newaxis],
-                    self.guided_noise + 5,
+                    self.guided_noise + 3,
                     1e-6,
                 )
                 images[3] = guided_filter(
                     images[1].mean(axis=-1),
                     images[3][..., np.newaxis],
-                    self.guided_noise + 5,
+                    self.guided_noise + 3,
                     1e-6,
                 )
 
+        images = [self.__to_tensor(img) for img in images]
         if self.gamma_noise is not None:
             if self.noise_target == "rgb":
-                images[0] = gamma_correction(
-                    images[0], self.gamma_noise + random.random() + 0.1
-                )
-                images[1] = gamma_correction(
-                    images[1], self.gamma_noise + random.random() + 0.1
-                )
-            else:
-                images[2] = gamma_correction(
-                    images[2], self.gamma_noise + random.random() * 2 + 0.1
-                )
-                images[3] = gamma_correction(
-                    images[3], self.gamma_noise + random.random() * 2 + 0.1
-                )
+                images[0] = apply_patch_gamma_correction_torch(images[0].unsqueeze(0))[
+                    0
+                ]
+                images[1] = apply_patch_gamma_correction_torch(images[1].unsqueeze(0))[
+                    0
+                ]
 
-        images = [self.__to_tensor(img) for img in images]
+            else:
+                images[2] = apply_patch_gamma_correction_torch(images[2].unsqueeze(0))[
+                    0
+                ]
+                images[3] = apply_patch_gamma_correction_torch(images[3].unsqueeze(0))[
+                    0
+                ]
 
         indices = torch.randperm(self.cut_resolution[1] * self.cut_resolution[0])[:5000]
         u = indices % self.cut_resolution[1]
@@ -283,44 +286,44 @@ class StereoDataset(EntityDataSet):
                                 )
                             )
 
-            for filter in [
-                "frame_burnt_filtered",
-                "frame_burnt_light_filtered",
-                "frame_darken_filtered",
-                "frame_darken_gain_filtered",
-            ]:
-                if filter in entry:
-                    filtered = entry[filter]
-                elif not os.path.exists(
-                    entry["rgb"][0].replace("frames_cleanpass", filter)
-                ) or not os.path.exists(
-                    entry["rgb"][1].replace("frames_cleanpass", filter)
-                ):
-                    continue
-                else:
-                    filtered = (
-                        entry["rgb"][0].replace("frames_cleanpass", filter),
-                        entry["rgb"][1].replace("frames_cleanpass", filter),
-                    )
-                    entry[filter] = filtered
+            # for filter in [
+            #     "frame_burnt_filtered",
+            #     "frame_burnt_light_filtered",
+            #     "frame_darken_filtered",
+            #     "frame_darken_gain_filtered",
+            # ]:
+            #     if filter in entry:
+            #         filtered = entry[filter]
+            #     elif not os.path.exists(
+            #         entry["rgb"][0].replace("frames_cleanpass", filter)
+            #     ) or not os.path.exists(
+            #         entry["rgb"][1].replace("frames_cleanpass", filter)
+            #     ):
+            #         continue
+            #     else:
+            #         filtered = (
+            #             entry["rgb"][0].replace("frames_cleanpass", filter),
+            #             entry["rgb"][1].replace("frames_cleanpass", filter),
+            #         )
+            #         entry[filter] = filtered
 
-                self.entries.append(
-                    EntityFlying3d([*filtered, *nir], entry["disparity"])
-                )
-                if self.args.noised_input:
-                    for _ in range(2):
-                        for t in ["rgb", "nir"]:
-                            self.entries.append(
-                                EntityFlying3d(
-                                    [*filtered, *nir_ambient],
-                                    entry["disparity"],
-                                    guided_noise=int((random.random() * 100) % 20),
-                                    gamma_noise=(random.random() * 2),
-                                    shift_filter=self.args.shift_filter,
-                                    vertical_scale=self.args.vertical_scale,
-                                    noise_target=t,
-                                )
-                            )
+            #     self.entries.append(
+            #         EntityFlying3d([*filtered, *nir], entry["disparity"])
+            #     )
+            #     if self.args.noised_input:
+            #         for _ in range(2):
+            #             for t in ["rgb", "nir"]:
+            #                 self.entries.append(
+            #                     EntityFlying3d(
+            #                         [*filtered, *nir_ambient],
+            #                         entry["disparity"],
+            #                         guided_noise=int((random.random() * 100) % 20),
+            #                         gamma_noise=(random.random() * 2),
+            #                         shift_filter=self.args.shift_filter,
+            #                         vertical_scale=self.args.vertical_scale,
+            #                         noise_target=t,
+            #                     )
+            #                 )
 
             if validate:
                 validated = True
