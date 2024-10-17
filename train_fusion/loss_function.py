@@ -2,7 +2,6 @@ from typing import List
 import torch
 import torch.nn.functional as F
 import numpy as np
-from core.raft_stereo_fusion import RAFTStereoFusion
 from train_fusion.ssim.utils import SSIM, warp
 
 
@@ -22,6 +21,89 @@ def ssim(x, y, channel=1):
     SSIM = SSIM_n / SSIM_d
 
     return SSIM
+
+
+def loss_fn_depth_gt_box(
+    flow_preds: list[torch.Tensor], target_gt: torch.Tensor, box_size=5, weight=0.9
+):
+    """
+    박스 필터를 사용하여 LiDAR 포인트 주변의 깊이 예측 손실을 계산합니다.
+
+    Parameters:
+    - flow_preds: List of flow predictions (each of shape [B,1,H,W]).
+    - target_gt: Ground truth tensor of shape [B, N, 3] where last dim is (v, u, depth).
+    - box_size: 박스의 크기 (기본값은 5).
+    - weight: 각 예측 단계의 가중치 (기본값은 0.9).
+
+    Returns:
+    - depth_loss: 전체 박스 손실의 평균.
+    - depth_loss_last: 마지막 플로우 예측의 손실.
+    """
+    B, N = target_gt.shape[:2]
+    device = target_gt.device
+    dtype = target_gt.dtype
+
+    # 목표 픽셀 위치 (v, u) 추출 및 클램핑
+    gt_v = target_gt[:, :, 1].float()  # y 좌표
+    gt_u = target_gt[:, :, 0].float()  # x 좌표
+    target_depth = target_gt[:, :, 2]  # 목표 깊이 (B, N)
+
+    # 흐름 예측의 크기 가져오기
+    B, _, H, W = flow_preds[-1].shape
+
+    # 박스 반지름 계산
+    half_box = box_size // 2
+
+    # 박스 오프셋 생성: [box_size^2, 2]
+    # torch.meshgrid을 사용하여 박스 내 모든 오프셋을 생성
+    offset_range = torch.arange(-half_box, half_box + 1, device=device)
+    grid_v, grid_u = torch.meshgrid(
+        offset_range, offset_range, indexing="ij"
+    )  # grid_v, grid_u: [box_size, box_size]
+    delta = torch.stack((grid_u.flatten(), grid_v.flatten()), dim=1)  # [box_size^2, 2]
+
+    # 박스 내 좌표의 수
+    num_offsets = box_size**2
+
+    # 초기화
+    depth_loss = 0.0
+    flows_len = len(flow_preds)
+    depth_loss_last = 0
+
+    for idx, flow in enumerate(flow_preds):
+        # flow: [B, 1, H, W]
+
+        # 각 (u, v)에 대해 박스 영역의 u, v 좌표 계산
+        # target_u, target_v: [B, N]
+        # delta: [box_size^2, 2]
+        # expanded_gt_u, expanded_gt_v: [B, N, box_size^2]
+        expanded_gt_u = gt_u.unsqueeze(-1) + delta[:, 0]  # [B, N, box_size^2]
+        expanded_gt_v = gt_v.unsqueeze(-1) + delta[:, 1]  # [B, N, box_size^2]
+
+        expanded_gt_u = expanded_gt_u / (W - 1) * 2 - 1
+        expanded_gt_v = expanded_gt_v / (H - 1) * 2 - 1
+
+        grid = torch.stack((expanded_gt_u, expanded_gt_v), dim=-1)
+        grid = grid.view(B, 5000 * num_offsets, 1, 2)
+        sampled_flow = F.grid_sample(flow, grid, align_corners=True)
+        target_pred = (
+            sampled_flow.view(B, 1, 5000, num_offsets, 1).squeeze(1).squeeze(-1)
+        )  # (b, n, 25)
+
+        target_pred = target_pred.mean(dim=-1)
+
+        # 손실 계산: 절대 차이
+        loss = torch.abs(target_pred - target_depth)  # [B, N]
+
+        # 각 예측 단계의 가중치 적용
+        loss = loss.mean(dim=1) * (weight ** (flows_len - idx))
+        depth_loss += loss
+        depth_loss_last = loss  # 마지막 플로우의 손실
+
+    # 전체 평균 박스 손실 계산
+    depth_loss_last = depth_loss_last.mean()
+
+    return depth_loss.mean(), depth_loss_last
 
 
 def reproject_disparity(
@@ -83,12 +165,17 @@ def warp_reproject_loss(
     img_right = img_right / 255.0
     # Apply ReLU to ensure disparity is non-negative
     for i, flow_pred in enumerate(flow_preds):
+        # print("warping")
         warp_right = warp(img_left, flow_pred)
+        # print("mask")
         mask = warp(torch.ones_like(img_left).to(img_left.device), flow_pred, "zeros")
+        # print("SSIM")
         ssim_loss = SSIM()(warp_right, img_right)
+        # print("L1")
         l1_loss = torch.abs(warp_right - img_right)
+        # print("Sum")
         loss = (ssim_loss * 0.85 + 0.15 * l1_loss.mean(1, True))[mask > 0]
-
+        # print("Return")
         flow_loss += loss.mean() * (loss_beta ** (len(flow_preds) - i - 1))
 
         # reproject = reproject_disparity(flow_pred, img_left)
@@ -100,8 +187,8 @@ def warp_reproject_loss(
         # flow_loss += ssim_loss * (loss_beta ** (preds_cnt - i - 1))
 
     return flow_loss, {
-        "ssim_loss": ssim_loss[mask > 0].mean().item(),
-        "l1_loss": l1_loss[mask > 0].mean().item(),
+        "ssim_loss": ssim_loss[mask > 0].mean(),
+        "l1_loss": l1_loss[mask > 0].mean(),
     }
 
 
@@ -166,6 +253,8 @@ def disparity_smoothness(disp, img):
     # Loop over disparity scales and calculate smoothness
     dis_len = len(disp)
     for idx, scaled_disp in enumerate(disp):
+        mean_disp = scaled_disp.mean(2, True).mean(3, True)
+        scaled_disp = scaled_disp / (mean_disp + 1e-7)
         disp_smoothness += (weight ** (dis_len - idx - 1)) * get_disparity_smoothness(
             scaled_disp, img
         ).mean()
@@ -189,7 +278,7 @@ def self_supervised_loss(input, flow):
     return loss.mean(), metric
 
 
-def self_fm_loss(model: RAFTStereoFusion, input, flow):
+def self_fm_loss(model, input, flow):
     model.eval()
     image_viz_left, image_viz_right, image_nir_left, image_nir_right = input
 
@@ -220,6 +309,7 @@ def gt_loss(model, flow_gt, flow_preds, loss_gamma=0.9, max_flow=700):
 
     _, _, h, w = flow_preds[-1].shape
     flow_gt = -flow_gt[:, :, :h, :w]
+    mask = flow_gt <= 0
     for i in range(n_predictions):
         assert (
             not torch.isnan(flow_preds[i]).any()
@@ -232,21 +322,19 @@ def gt_loss(model, flow_gt, flow_preds, loss_gamma=0.9, max_flow=700):
             i_weight = 1.0
         # print(flow_preds[i].shape, flow_gt.shape)
         # i_loss = (flow_preds[i] - flow_gt[:, :, :h, :w]).abs()
-        flow_gt_cropped = flow_gt[:, :, :h, :w]
-        flow_pred_cropped = flow_preds[i][:, :, :h, :w]
-
         # 마스크 생성: 모든 채널이 0보다 큰 픽셀
-        mask = flow_gt_cropped <= 0
 
+        # i_loss = torch.abs(flow_preds[i] - flow_gt)
         # 마스크된 L1 손실 계산
         i_loss = (
-            F.l1_loss(flow_pred_cropped[mask], flow_gt_cropped[mask], reduction="mean")
+            torch.abs(flow_preds[i] - flow_gt)[mask]
             if mask.any()
             else torch.tensor(0.0, device=flow_gt.device)
         )
 
         flow_loss += i_weight * i_loss.mean()
-
+    flow_preds[-1][~mask] = 0
+    flow_gt[~mask] = 0
     epe = torch.sum((flow_preds[-1] - flow_gt) ** 2, dim=1).sqrt()
     epe = epe.view(-1)
 
@@ -258,3 +346,31 @@ def gt_loss(model, flow_gt, flow_preds, loss_gamma=0.9, max_flow=700):
     }
 
     return flow_loss, metrics
+
+
+class DynamicRangeLoss(torch.nn.Module):
+    def __init__(self, epsilon=1e-6):
+        super(DynamicRangeLoss, self).__init__()
+        self.epsilon = epsilon  # 0으로 나누는 것을 방지하기 위한 작은 값
+
+    def forward(self, x):
+        """
+        x: Tensor of shape (batch_size, 3, height, width)
+        """
+        # Reshape to (batch_size, channels, height * width)
+        x_reshaped = x.view(x.size(0), x.size(1), -1)
+
+        # Compute max and min per batch and channel
+        max_vals, _ = x_reshaped.max(dim=2)  # Shape: (batch_size, 3)
+        min_vals, _ = x_reshaped.min(dim=2)  # Shape: (batch_size, 3)
+
+        # Avoid division by zero
+        min_vals = min_vals + self.epsilon
+
+        # Compute dynamic range
+        dynamic_range = torch.log10(max_vals / min_vals)  # Shape: (batch_size, 3)
+        dynamic_range = torch.clip(dynamic_range, 0, 2)
+        # Optionally, take the mean over batch and channels
+        loss = dynamic_range.mean()
+
+        return loss
