@@ -42,11 +42,13 @@ class DDPTrainer:
         self.train_sampler, self.valid_sampler, self.train_loader, self.valid_loader = (
             self.init_dataloader()
         )
+        self.train_mode()
         self.init_optimizers()
         self.loss_fn = self.init_loss_function()
         # rank 0에서만 로거 초기화
         if dist.get_rank() == 0:
             self.logger = Logger(self.model.module, self.scheduler)
+            self.logger.total_steps = self.total_steps
 
     def signal_handler(self, sig, frame):
         print(f"Process {dist.get_rank()} received signal {sig}")
@@ -79,8 +81,9 @@ class DDPTrainer:
 
     def init_optimizers(self):
         """옵티마이저 및 스케줄러를 초기화합니다."""
+        self.train_mode()
         self.optimizer = optim.AdamW(
-            self.model.parameters(),
+            filter(lambda p: p.requires_grad, self.model.parameters()),
             lr=self.args.lr,
             weight_decay=self.args.wdecay,
             eps=1e-8,
@@ -123,17 +126,17 @@ class DDPTrainer:
 
                     if dist.get_rank() == 0:
                         self.log_metrics(loss, metrics)
-                    self.scaler.scale(loss).backward()
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                    self.scaler.step(self.optimizer)
-                    self.scheduler.step()
-                    self.scaler.update()
-                    self.total_steps += 1
+                    with torch.autograd.detect_anomaly():
+                        self.scaler.scale(loss).backward()
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                        self.scaler.step(self.optimizer)
+                        self.scheduler.step()
+                        self.scaler.update()
 
-                    if i_batch % 100 == 0 and dist.get_rank() == 0:
+                    if i_batch % 10 == 0 and dist.get_rank() == 0:
                         self.log_figures(i_batch, data_blob)
-
+                    self.total_steps += 1
                     if (
                         dist.get_rank() == 0
                         and self.total_steps % self.args.valid_steps == 0
@@ -182,7 +185,15 @@ class DDPTrainer:
         """모델 체크포인트 저장"""
         save_path = Path(f"checkpoints/{self.total_steps}_{self.args.name}.pth")
         logging.info(f"Saving file {save_path.absolute()}")
-        torch.save(self.model.module.state_dict(), save_path)
+        model_dict = {
+            "model_state_dict": self.model.module.state_dict(),
+            "total_steps": self.total_steps,
+        }
+        torch.save(model_dict, save_path)
+        torch.save(
+            model_dict,
+            Path(f"checkpoints/latest_{self.args.name}.pth"),
+        )
 
     def run_validation(self):
         """검증을 실행합니다."""

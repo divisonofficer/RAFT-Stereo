@@ -60,7 +60,7 @@ class EntityFlying3d(Entity):
         self.shift_filter = shift_filter
         self.vertical_scale = vertical_scale
         self.noise_target = noise_target
-        self.shift_distance = random.randint(4, 16)
+        self.shift_distance = random.randint(8, 24)
 
     def __read_img(self, filename):
         if filename.endswith(".pfm"):
@@ -156,7 +156,7 @@ class EntityFlying3d(Entity):
             images, (disparity, _) = inputs_disparity_shift(
                 [x.unsqueeze(0) for x in images],
                 [disparity.unsqueeze(0), disparity_right.unsqueeze(0)],
-                random.randint(8, 32),
+                self.shift_distance,
             )
             images = [x[0] for x in images]
             disparity = disparity[0]
@@ -211,6 +211,7 @@ class StereoDatasetArgs:
         noised_input=False,
         shift_filter=False,
         vertical_scale=False,
+        rgb_rendered=False,
     ):
         self.folder = folder
         self.flow3d_driving_json = flow3d_driving_json
@@ -222,6 +223,7 @@ class StereoDatasetArgs:
         self.noised_input = noised_input
         self.shift_filter = shift_filter
         self.vertical_scale = vertical_scale
+        self.rgb_rendered = rgb_rendered
 
 
 class StereoDataset(EntityDataSet):
@@ -271,20 +273,42 @@ class StereoDataset(EntityDataSet):
                 self.entries.append(
                     EntityFlying3d([*entry["rgb"], *nir], entry["disparity"])
                 )
-                if self.args.noised_input:
-                    for _ in range(5):
-                        for t in ["rgb", "nir"]:
-                            self.entries.append(
-                                EntityFlying3d(
-                                    [*entry["rgb"], *nir_ambient],
-                                    entry["disparity"],
-                                    guided_noise=int((random.random() * 100) % 20),
-                                    gamma_noise=(random.random() * 2),
-                                    shift_filter=self.args.shift_filter,
-                                    vertical_scale=self.args.vertical_scale,
-                                    noise_target=t,
-                                )
+            if self.args.rgb_rendered:
+                for i in range(10):
+                    render_left = (
+                        entry["rgb"][0]
+                        .replace("frames_cleanpass", "frame_shaded")
+                        .replace(".png", f"_{i}.png")
+                    )
+                    render_right = (
+                        entry["rgb"][0]
+                        .replace("frames_cleanpass", "frame_shaded")
+                        .replace(".png", f"_{i}.png")
+                        .replace("left", "right")
+                    )
+                    if os.path.exists(render_left) and os.path.exists(render_right):
+                        self.entries.append(
+                            EntityFlying3d(
+                                [render_left, render_right, *nir],
+                                entry["disparity"],
+                                shift_filter=self.args.shift_filter,
                             )
+                        )
+
+            if self.args.noised_input:
+                for _ in range(5):
+                    for t in ["rgb", "nir"]:
+                        self.entries.append(
+                            EntityFlying3d(
+                                [*entry["rgb"], *nir_ambient],
+                                entry["disparity"],
+                                guided_noise=int((random.random() * 100) % 20),
+                                gamma_noise=(random.random() * 2),
+                                shift_filter=self.args.shift_filter,
+                                vertical_scale=self.args.vertical_scale,
+                                noise_target=t,
+                            )
+                        )
 
             # for filter in [
             #     "frame_burnt_filtered",

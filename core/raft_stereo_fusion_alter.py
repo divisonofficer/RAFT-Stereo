@@ -59,6 +59,30 @@ class RAFTStereoFusionAlter(nn.Module):
             if isinstance(m, nn.BatchNorm2d):
                 m.eval()
 
+    def freeze_raft(self):
+        if "BatchNorm" in self.args.freeze_backbone:
+            self.freeze_bn()
+        if "Extractor" in self.args.freeze_backbone:
+            self.cnet.freeze_raft()
+
+        if self.args.shared_backbone:
+            if "Volume" in self.args.freeze_backbone:
+                self.conv2.eval()
+        else:
+            if "Extractor" in self.args.freeze_backbone:
+                self.fnet.eval()
+                for name, param in self.fnet.named_parameters():
+                    param.requires_grad = False
+        if "Volume" in self.args.freeze_backbone:
+            self.context_zqr_convs.eval()
+            for name, param in self.context_zqr_convs.named_parameters():
+                param.requires_grad = False
+        if "Updater" in self.args.freeze_backbone:
+            self.update_block.eval()
+            for name, param in self.update_block.named_parameters():
+                param.requires_grad = False
+        self.freeze_bn()
+
     def initialize_flow(self, img):
         """Flow is represented as difference between two coordinate grids flow = coords1 - coords0"""
         N, _, H, W = img.shape
@@ -98,12 +122,14 @@ class RAFTStereoFusionAlter(nn.Module):
         img_rgb_r = (2 * (img_rgb_r / 255.0) - 1.0).contiguous()
         img_nir_l = (2 * (img_nir_l / 255.0) - 1.0).contiguous()
         img_nir_r = (2 * (img_nir_r / 255.0) - 1.0).contiguous()
-        img_nir_l = img_nir_l.rpeat(1, 3, 1, 1)
-        img_nir_r = img_nir_r.rpeat(1, 3, 1, 1)
+        img_nir_l = img_nir_l.repeat(1, 3, 1, 1)
+        img_nir_r = img_nir_r.repeat(1, 3, 1, 1)
 
         # run the context network
         with autocast(enabled=self.args.mixed_precision):
-            cnet_list = self.cnet(img_rgb_l, num_layers=self.args.n_gru_layers)
+            cnet_list = self.cnet(
+                img_rgb_l, img_nir_l, num_layers=self.args.n_gru_layers
+            )
             fmap_rgb_l, fmap_rgb_r = self.fnet([img_rgb_l, img_rgb_r])
             fmap_nir_l, fmap_nir_r = self.fnet([img_nir_l, img_nir_r])
             net_list = [torch.tanh(x[0]) for x in cnet_list]

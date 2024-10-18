@@ -21,7 +21,7 @@ except ImportError:
     import os
 
     os.chdir("/RAFT-Stereo")
-    from core.raft_stereo_fusion import RAFTStereoFusion
+    from core.raft_stereo_fusion_alter import RAFTStereoFusionAlter
 from fusion_args import FusionArgs
 from train_fusion.ddp import DDPTrainer
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -44,7 +44,7 @@ class RaftTrainer(DDPTrainer):
     def __init__(self):
         args = FusionArgs()
         args.restore_ckpt = "models/raftstereo-eth3d.pth"
-        # args.restore_ckpt = "checkpoints/latest_BAFFAlterSynth.pth"
+        args.restore_ckpt = "checkpoints/latest_BAFFAlterSynth.pth"
         args.n_gru_layers = 3
         args.n_downsample = 2
         args.batch_size = 6
@@ -63,7 +63,7 @@ class RaftTrainer(DDPTrainer):
         super().__init__(args)
 
     def init_models(self) -> Module:
-        model = RAFTStereoFusion(self.args).to(self.device)
+        model = RAFTStereoFusionAlter(self.args).to(self.device)
         if self.args.restore_ckpt.isdigit():
             self.args.restore_ckpt = (
                 f"checkpoints/{self.args.restore_ckpt}_{self.args.name}.pth"
@@ -260,9 +260,9 @@ class RaftTrainer(DDPTrainer):
             inputs[:4],
             target_gt,
             disp_gt,
-            False,
+            True,
             lidar_loss=False,
-            self_loss=True,
+            self_loss=False,
         )
         total_loss += loss
         return total_loss, metrics
