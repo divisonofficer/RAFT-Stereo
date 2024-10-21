@@ -102,8 +102,8 @@ def main():
     valid_cnt = cnt - train_cnt
     print(f"Total dataset size: {cnt}")
 
-    dataset_train = MyH5DataSet(id_list=dataset.frame_id_list[:train_cnt])
-    dataset_valid = MyH5DataSet(id_list=dataset.frame_id_list[train_cnt:])
+    dataset_train = MyH5DataSet(id_list=dataset.input_list[:train_cnt])
+    dataset_valid = MyH5DataSet(id_list=dataset.input_list[train_cnt:])
 
     # DistributedSampler 생성
     train_sampler = DistributedSampler(dataset_train)

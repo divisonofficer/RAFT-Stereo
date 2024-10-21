@@ -126,15 +126,14 @@ class DDPTrainer:
 
                     if dist.get_rank() == 0:
                         self.log_metrics(loss, metrics)
-                    with torch.autograd.detect_anomaly():
-                        self.scaler.scale(loss).backward()
-                        self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                        self.scaler.step(self.optimizer)
-                        self.scheduler.step()
-                        self.scaler.update()
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    self.scaler.step(self.optimizer)
+                    self.scheduler.step()
+                    self.scaler.update()
 
-                    if i_batch % 10 == 0 and dist.get_rank() == 0:
+                    if i_batch % 100 == 0 and dist.get_rank() == 0:
                         self.log_figures(i_batch, data_blob)
                     self.total_steps += 1
                     if (

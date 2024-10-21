@@ -51,8 +51,8 @@ class RaftTrainer(DDPTrainer):
     ) -> Tuple[DistributedSampler, DistributedSampler, DataLoader, DataLoader]:
         dataset = MyH5DataSet(frame_cache=True)
         train_cnt = int(len(dataset) * 0.95)
-        dataset_train = MyH5DataSet(id_list=dataset.frame_id_list[:train_cnt])
-        dataset_valid = MyH5DataSet(id_list=dataset.frame_id_list[train_cnt:])
+        dataset_train = MyH5DataSet(id_list=dataset.input_list[:train_cnt])
+        dataset_valid = MyH5DataSet(id_list=dataset.input_list[train_cnt:])
         train_sampler = DistributedSampler(dataset_train)
         valid_sampler = DistributedSampler(dataset_valid)
         return (
@@ -107,7 +107,7 @@ class RaftTrainer(DDPTrainer):
             #         v = torch.tensor(v, device=flow[-1].device)
             #     loss_dict[k] = v
             depth_loss = loss_fn_detph_gt(flow[-1], target_gt)
-            depth_loss = depth_loss.mean()
+            depth_loss = depth_loss.mean() / 20.0
 
             # Ensure depth_loss is a tensor
             if not isinstance(depth_loss, torch.Tensor):
@@ -115,7 +115,7 @@ class RaftTrainer(DDPTrainer):
 
             loss_dict["depth_loss"] = depth_loss
 
-            total_loss = depth_loss
+            total_loss = warp_loss.mean() + depth_loss
             return total_loss, loss_dict
 
         return loss_fn

@@ -604,3 +604,116 @@ def compute_disparity_lidar_error(
     v = v.astype(np.int32)
     rmse = rmse_loss(disparity, d)
     return rmse
+
+
+def chamfer_loss_pc(pc1, pc2):
+    """
+    Chamfer Loss를 순수 PyTorch로 구현
+    Args:
+        pc1: [B, N, 3] 텐서
+        pc2: [B, M, 3] 텐서
+        batch_size: 메모리 최적화를 위한 배치 크기 (기본값: 1)
+        device: 'cuda' 또는 'cpu'
+    Returns:
+        loss: 스칼라 텐서
+    """
+    B, N, _ = pc1.shape
+    _, M, _ = pc2.shape
+    loss = 0.0
+
+    # 각 배치에 대해 Chamfer Loss 계산
+    for b in range(B):
+        # 포인트 클라우드 A와 B
+        A = pc1[b]  # [N, 3]
+        B_pc = pc2[b]  # [M, 3]
+
+        # 메모리 최적화를 위해 N과 M을 작은 배치로 나누기
+        # 예: N_chunk와 M_chunk를 설정하여 한 번에 처리할 포인트 수를 제한
+        N_chunk_size = 1024
+        M_chunk_size = 1024
+
+        # A to B
+        min_dist_A_to_B = []
+        for i in range(0, N, N_chunk_size):
+            A_chunk = A[i : i + N_chunk_size].unsqueeze(1)  # [chunk, 1, 3]
+            B_expand = B_pc.unsqueeze(0)  # [1, M, 3]
+            dists = torch.norm(A_chunk - B_expand, dim=2)  # [chunk, M]
+            min_dists, _ = torch.min(dists, dim=1)  # [chunk]
+            min_dist_A_to_B.append(min_dists)
+        min_dist_A_to_B = torch.cat(min_dist_A_to_B, dim=0)  # [N]
+        loss_A_to_B = min_dist_A_to_B.mean()
+
+        # B to A
+        min_dist_B_to_A = []
+        for i in range(0, M, M_chunk_size):
+            B_chunk = B_pc[i : i + M_chunk_size].unsqueeze(1)  # [chunk, 1, 3]
+            A_expand = A.unsqueeze(0)  # [1, N, 3]
+            dists = torch.norm(B_chunk - A_expand, dim=2)  # [chunk, N]
+            min_dists, _ = torch.min(dists, dim=1)  # [chunk]
+            min_dist_B_to_A.append(min_dists)
+        min_dist_B_to_A = torch.cat(min_dist_B_to_A, dim=0)  # [M]
+        loss_B_to_A = min_dist_B_to_A.mean()
+
+        loss += loss_A_to_B + loss_B_to_A
+
+    # 평균을 내기 위해 배치 크기로 나누기
+    loss = loss / B
+    return loss
+
+
+def disparity_map_to_point_cloud(
+    disparity_map: torch.Tensor, fx=860, cx=360, cy=270, bs=135
+):
+    depth = torch.where(
+        disparity_map > 0, fx * bs / disparity_map, torch.zeros_like(disparity_map)
+    )
+
+    B, _, H, W = disparity_map.shape
+    device = depth.device
+
+    # 생성할 좌표 그리드
+    u = torch.arange(0, W, device=device).view(1, 1, W).expand(B, 1, H, W)
+    v = torch.arange(0, H, device=device).view(1, H, 1).expand(B, 1, H, W)
+    x = (u - cx) * depth / fx
+    y = (v - cy) * depth / fx
+    z = depth
+    point_cloud = torch.stack([x, y, z], dim=1).reshape(B, 3, -1).permute(0, 2, 1)
+    return point_cloud
+
+
+def downsample_point_cloud(point_cloud, num_samples):
+    """
+    포인트 클라우드를 무작위로 다운샘플링
+    Args:
+        point_cloud: [B, N, 3] 텐서
+        num_samples: 샘플링할 포인트 수
+    Returns:
+        downsampled_pc: [B, num_samples, 3] 텐서
+    """
+    B, N, _ = point_cloud.shape
+    if N <= num_samples:
+        return point_cloud
+    indices = torch.randint(0, N, (B, num_samples), device=point_cloud.device)
+    downsampled_pc = torch.gather(point_cloud, 1, indices.unsqueeze(-1).repeat(1, 1, 3))
+    return downsampled_pc
+
+
+def disparity_points_loss(
+    disparity_map: torch.Tensor,
+    point_disparity: torch.Tensor,
+    fx=860,
+    cx=360,
+    cy=270,
+    bs=135,
+):
+    point_depth = torch.where(
+        point_disparity > 0,
+        fx * bs / point_disparity,
+        torch.zeros_like(point_disparity),
+    )
+    point_depth[..., 0] = (point_depth[..., 0] - cx) * point_depth[..., 2] / fx
+    point_depth[..., 1] = (point_depth[..., 1] - cy) * point_depth[..., 2] / fx
+    pred_point_cloud = disparity_map_to_point_cloud(disparity_map, fx, cx, cy, bs)
+    pred_point_cloud = downsample_point_cloud(pred_point_cloud, 10000)
+    loss = chamfer_loss_pc(pred_point_cloud, point_depth)
+    return loss

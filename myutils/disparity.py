@@ -1,5 +1,7 @@
+from collections import OrderedDict
 import numpy as np
 import cv2
+import torch
 
 
 def disparity_to_depth(disparity: np.ndarray, focal_length: float, baseline: float):
@@ -20,3 +22,30 @@ def disparity_color(
     disparity = (disparity * 255).astype(np.uint8)
     disparity = cv2.applyColorMap(disparity, colormap)
     return disparity
+
+
+from core.raft_stereo import RAFTStereo
+from fusion_args import FusionArgs
+
+
+def get_raft_stereo():
+    args = FusionArgs()
+    args.shared_backbone = True
+    args.n_downsample = 3
+    args.n_gru_layers = 2
+    model = RAFTStereo(args)
+
+    checkpoint = torch.load("models/raftstereo-realtime.pth")
+    # 새로운 state_dict 생성
+    new_state_dict = OrderedDict()
+
+    for key, value in checkpoint.items():
+        if key.startswith("module."):
+            # 'module.' 접두사 제거
+            new_key = key[7:]
+        else:
+            new_key = key
+        new_state_dict[new_key] = value
+    model.load_state_dict(new_state_dict)
+    model.eval()
+    return model

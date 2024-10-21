@@ -41,8 +41,8 @@ class RaftTrainer(DDPTrainer):
     ) -> Tuple[DistributedSampler, DistributedSampler, DataLoader, DataLoader]:
         dataset = MyH5DataSet(frame_cache=True)
         train_cnt = int(len(dataset) * 0.95)
-        dataset_train = MyH5DataSet(id_list=dataset.frame_id_list[:train_cnt])
-        dataset_valid = MyH5DataSet(id_list=dataset.frame_id_list[train_cnt:])
+        dataset_train = MyH5DataSet(id_list=dataset.input_list[:train_cnt])
+        dataset_valid = MyH5DataSet(id_list=dataset.input_list[train_cnt:])
         train_sampler = DistributedSampler(dataset_train)
         valid_sampler = DistributedSampler(dataset_valid)
         return (
