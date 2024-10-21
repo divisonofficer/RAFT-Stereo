@@ -16,6 +16,15 @@ class LocalAttentionModule(nn.Module):
         )
         self.local_bn2 = nn.BatchNorm2d(in_channels)
 
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm)):
+                if m.weight is not None:
+                    nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
     def forward(self, x):
         local_branch = self.local_conv1(x)
         local_branch = self.local_bn1(local_branch)
@@ -44,6 +53,15 @@ class GlobalAttentionModule(nn.Module):
             in_channels // reduction, in_channels, kernel_size=1
         )
         self.global_bn2 = nn.BatchNorm2d(in_channels)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm)):
+                if m.weight is not None:
+                    nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
         # Global average pooling branch
