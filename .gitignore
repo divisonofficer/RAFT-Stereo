@@ -9,3 +9,5 @@ demo_output/*
 *.pub
 checkpoints/*
 data/*
+meg/*
+train_log/*

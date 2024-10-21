@@ -37,6 +37,8 @@ class FusionArgs:
         self.log_level = "logging.INFO"
         self.n_total_epoch = 10
 
+        self.alter_option: Literal["Fusion", "Origin", "Mixed"] = "Mixed"
+
     @property
     def hidden_dims(self):
         """GRU의 hidden state와 context의 차원을 설정합니다."""

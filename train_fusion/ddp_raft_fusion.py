@@ -44,17 +44,17 @@ class RaftTrainer(DDPTrainer):
     def __init__(self):
         args = FusionArgs()
         args.restore_ckpt = "models/raftstereo-eth3d.pth"
-        args.restore_ckpt = "checkpoints/latest_BAFFNoiseSynthSF.pth"
+        args.restore_ckpt = "checkpoints/latest_BAFFNoiseSynthShare.pth"
         args.n_gru_layers = 3
         args.n_downsample = 2
-        args.batch_size = 6
+        args.batch_size = 8
         args.valid_steps = 100
-        args.lr = 0.0005
+        args.lr = 0.0003
         args.train_iters = 7
         args.valid_iters = 7
         args.logger_dir = "runs_raft"
         args.fusion = "bAFF"
-        args.name = "BAFFNoiseSynthSF"
+        args.name = "BAFFNoiseSynthShare"
 
         args.shared_fusion = True
         args.shared_backbone = False
@@ -94,15 +94,17 @@ class RaftTrainer(DDPTrainer):
         self,
     ) -> Tuple[DistributedSampler, DistributedSampler, DataLoader, DataLoader]:
 
-        dataset = MyH5DataSet(frame_cache=False, use_right_shift=True)
-        # dataset = MyRefinedH5DataSet(use_right_shift=True)
-        # dataset_flying = StereoDataset(
-        #     StereoDatasetArgs(
-        #         flying3d_json=True,
-        #         noised_input=True,
-        #         shift_filter=True,
-        #     )
-        # )
+        # dataset = MyH5DataSet(frame_cache=False, use_right_shift=True)
+        dataset = MyRefinedH5DataSet(use_right_shift=True)
+        dataset_flying = StereoDataset(
+            StereoDatasetArgs(
+                flying3d_json=True,
+                noised_input=False,
+                shift_filter=True,
+                synth_no_rgb=True,
+                rgb_rendered=True,
+            )
+        )
         # dataset_driving = StereoDataset(
         #     StereoDatasetArgs(
         #         flow3d_driving_json=True,
@@ -117,9 +119,9 @@ class RaftTrainer(DDPTrainer):
         dataset_valid = EntityDataSet(dataset.input_list[train_cnt:])
 
         dataset_train = EntityDataSet(
-            dataset.input_list[:train_cnt]
+            # dataset.input_list[:train_cnt]
             # dataset_driving.input_list[: int(len(dataset_driving))]
-            # + dataset_flying.input_list[: int(len(dataset_flying) / 5)]
+            dataset_flying.input_list[: int(len(dataset_flying))]
         )
         print(len(dataset_train))
         # dataset_valid = EntityDataSet(dataset_flying.input_list[-500:])
@@ -136,7 +138,7 @@ class RaftTrainer(DDPTrainer):
             ),
             DataLoader(
                 dataset_valid,
-                batch_size=1,
+                batch_size=3,
                 sampler=valid_sampler,
                 num_workers=2,
             ),
@@ -284,9 +286,9 @@ class RaftTrainer(DDPTrainer):
             inputs[:4],
             target_gt,
             disp_gt,
-            False,
+            True,
             lidar_loss=False,
-            self_loss=True,
+            self_loss=False,
         )
         total_loss += loss
         return total_loss, metrics

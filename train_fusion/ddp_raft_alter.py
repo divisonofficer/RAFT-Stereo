@@ -43,22 +43,22 @@ import matplotlib.pyplot as plt
 class RaftTrainer(DDPTrainer):
     def __init__(self):
         args = FusionArgs()
-        args.restore_ckpt = "models/raftstereo-eth3d.pth"
-        args.restore_ckpt = "checkpoints/latest_BAFFAlterSynth.pth"
-        args.n_gru_layers = 3
-        args.n_downsample = 2
-        args.batch_size = 6
+        args.restore_ckpt = "models/raftstereo-realtime.pth"
+        # args.restore_ckpt = "checkpoints/latest_AFFAlterAtn.pth"
+        args.n_gru_layers = 2
+        args.n_downsample = 3
+        args.batch_size = 4
         args.valid_steps = 100
-        args.lr = 0.0005
+        args.lr = 0.0001
         args.train_iters = 7
         args.valid_iters = 7
         args.logger_dir = "runs_raft"
-        args.fusion = "bAFF"
-        args.name = "BAFFAlterSynth"
-
+        args.fusion = "AFF"
+        args.name = "AFFAlterAtn"
+        args.mixed_precision = False
         args.shared_fusion = True
-        args.shared_backbone = False
-        args.freeze_backbone = ["Extractor", "Updater", "Volume", "BatchNorm"]
+        args.shared_backbone = True
+        args.freeze_backbone = ["Extractor", "BatchNorm", "Updater", "Volume"]
         # args.freeze_backbone = ["BatchNorm"]
         super().__init__(args)
 
@@ -94,8 +94,8 @@ class RaftTrainer(DDPTrainer):
         self,
     ) -> Tuple[DistributedSampler, DistributedSampler, DataLoader, DataLoader]:
 
-        dataset = MyH5DataSet(frame_cache=True, use_right_shift=True)
-        # dataset = MyRefinedH5DataSet(use_right_shift=True)
+        # dataset = MyH5DataSet(frame_cache=True, use_right_shift=True)
+        dataset = MyRefinedH5DataSet(use_right_shift=True)
         dataset_flying = StereoDataset(
             StereoDatasetArgs(
                 flying3d_json=True,
@@ -118,9 +118,9 @@ class RaftTrainer(DDPTrainer):
         dataset_valid = EntityDataSet(dataset.input_list[train_cnt:])
 
         dataset_train = EntityDataSet(
-            # dataset.input_list[:train_cnt]
+            dataset.input_list[:train_cnt]
             # dataset_driving.input_list[: int(len(dataset_driving))]
-            dataset_flying.input_list[: int(len(dataset_flying))]
+            + dataset_flying.input_list[: int(len(dataset_flying) // 5)]
         )
         print(len(dataset_train))
         # dataset_valid = EntityDataSet(dataset_flying.input_list[-500:])
@@ -133,17 +133,17 @@ class RaftTrainer(DDPTrainer):
                 dataset_train,
                 batch_size=self.args.batch_size,
                 sampler=train_sampler,
-                num_workers=2,
+                num_workers=1,
             ),
             DataLoader(
                 dataset_valid,
                 batch_size=1,
                 sampler=valid_sampler,
-                num_workers=2,
+                num_workers=1,
             ),
         )
 
-    def create_image_figure(self, image, cmap=None, vmax=32):
+    def create_image_figure(self, image, cmap=None, vmax=48):
         fig, ax = plt.subplots()
         if image.ndim > 3:
             image = image[0]
@@ -163,6 +163,7 @@ class RaftTrainer(DDPTrainer):
             _, flow = self.model(
                 left_rgb, right_rgb, left_nir, right_nir, iters=7, test_mode=True
             )
+        flow = flow[:, :, :540, :720]
         idx = self.total_steps
         right_rgb_warped = self.self_loss.disocc_detection(flow, left_rgb)[1]
         ssim_loss = ssim_torch(right_rgb, right_rgb_warped)
@@ -254,7 +255,18 @@ class RaftTrainer(DDPTrainer):
         target_gt = inputs[-2]
         disp_gt = inputs[-1]
         total_loss = 0
-        flow = self.model(*inputs[:4], iters=7)
+        i = random.randint(0, 3)
+        # r_n = i % 2
+        # n_n = i // 2
+        r_n = 0
+        n_n = 0
+        flow = self.model(
+            inputs[2 * r_n],
+            inputs[1 + 2 * n_n],
+            inputs[2 * (1 - r_n)],
+            inputs[1 + 2 * (1 - n_n)],
+            iters=7,
+        )
         loss, metrics = self.loss_fn(
             flow,
             inputs[:4],
@@ -272,7 +284,7 @@ class RaftTrainer(DDPTrainer):
         model.eval()
         metrics: Dict[str, torch.Tensor] = {}
         losses = []
-        with torch.cuda.amp.autocast(enabled=True):
+        with torch.cuda.amp.autocast(enabled=self.args.mixed_precision):
             for i_batch, input_valid in enumerate(tqdm.tqdm(valid_loader)):
                 inputs = [x.to(self.device).to(torch.float32) for x in input_valid]
                 target_gt = inputs[-2]

@@ -47,16 +47,17 @@ class RaftTrainer(DDPTrainer):
 
         args = FusionArgs()
         args.restore_ckpt = "models/raftstereo-eth3d.pth"
-        args.restore_ckpt = "checkpoints/latest_HSVFusionSynth.pth"
+        # args.restore_ckpt = "checkpoints/latest_HSVFusionSynth.pth"
         args.shared_backbone = True
         args.n_gru_layers = 2
         args.n_downsample = 3
-        args.batch_size = 5
+        args.batch_size = 4
         args.valid_steps = 100
-        args.lr = 0.005
+        args.lr = 0.0001
         # args.corr_implementation = "reg"
         args.name = "HSVFusionSynth"
         args.shared_fusion = True
+        args.mixed_precision = False
         args.freeze_backbone = ["Extractor", "Updater", "Volume", "BatchNorm"]
         self.args = args
         super().__init__(args)
@@ -117,7 +118,8 @@ class RaftTrainer(DDPTrainer):
             StereoDatasetArgs(
                 flying3d_json=True,
                 shift_filter=True,
-                noised_input=True,
+                noised_input=False,
+                rgb_rendered=True,
             )
         )
         dataset_train = EntityDataSet(input_list=dataset.input_list)
@@ -132,13 +134,13 @@ class RaftTrainer(DDPTrainer):
                 dataset_train,
                 batch_size=self.args.batch_size,
                 sampler=train_sampler,
-                num_workers=4,
+                num_workers=1,
             ),
             DataLoader(
                 dataset_valid,
                 batch_size=1,
                 sampler=valid_sampler,
-                num_workers=4,
+                num_workers=1,
             ),
         )
 
@@ -217,7 +219,7 @@ class RaftTrainer(DDPTrainer):
             metric["brighness_center"] = loss_bright
             metric["epe"] = epe
 
-            return loss_warp + loss_expo + loss_bright / 100 + epe / 20, metric
+            return loss_warp + loss_expo + loss_bright / 100 + epe, metric
 
         return loss_fn
 

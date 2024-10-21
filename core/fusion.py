@@ -38,12 +38,12 @@ class GlobalAttentionModule(nn.Module):
         self.global_conv1 = nn.Conv2d(
             in_channels, in_channels // reduction, kernel_size=1
         )
-        self.global_ln1 = nn.LayerNorm([in_channels // reduction, 1, 1])
+        self.global_bn1 = nn.BatchNorm2d(in_channels // reduction)
         self.global_relu = nn.ReLU(inplace=False)
         self.global_conv2 = nn.Conv2d(
             in_channels // reduction, in_channels, kernel_size=1
         )
-        self.global_ln2 = nn.LayerNorm([in_channels, 1, 1])
+        self.global_bn2 = nn.BatchNorm2d(in_channels)
 
     def forward(self, x):
         # Global average pooling branch
@@ -52,13 +52,13 @@ class GlobalAttentionModule(nn.Module):
         # First branch
 
         global_branch = self.global_conv1(avg_pool)
-        global_branch = self.global_ln1(global_branch)
+        global_branch = self.global_bn1(global_branch)
 
         global_branch = self.global_relu(global_branch)
 
         global_branch = self.global_conv2(global_branch)
 
-        global_branch = self.global_ln2(global_branch)
+        global_branch = self.global_bn2(global_branch)
         return global_branch
 
 

@@ -279,7 +279,13 @@ class FusionMultiBasicEncoder(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(
-        self, x_viz, x_nir, dual_inp=False, num_layers=3, debug_attention=False
+        self,
+        x_viz,
+        x_nir,
+        dual_inp=False,
+        num_layers=3,
+        debug_attention=False,
+        fmap_out=False,
     ):
         x_viz = self.encoder(x_viz)
         x_nir = self.encoder(x_nir) if self.shared_extractor else self.encoder2(x_nir)
@@ -303,7 +309,11 @@ class FusionMultiBasicEncoder(nn.Module):
 
         if dual_inp:
             output_tuple += (v,)
-
+        if fmap_out:
+            output_tuple += (
+                x_viz,
+                x_nir,
+            )
         if debug_attention:
             x_rgb, x_nir = self.fusion(x_viz, x_nir, debug_attention=True)[1:]
             output_tuple += (

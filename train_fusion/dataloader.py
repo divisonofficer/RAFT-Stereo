@@ -60,7 +60,7 @@ class EntityFlying3d(Entity):
         self.shift_filter = shift_filter
         self.vertical_scale = vertical_scale
         self.noise_target = noise_target
-        self.shift_distance = random.randint(8, 24)
+        self.shift_distance = random.randint(8, 16)
 
     def __read_img(self, filename):
         if filename.endswith(".pfm"):
@@ -274,7 +274,8 @@ class StereoDataset(EntityDataSet):
                     EntityFlying3d([*entry["rgb"], *nir], entry["disparity"])
                 )
             if self.args.rgb_rendered:
-                for i in range(10):
+                for ir in range(10):
+                    i = 9 - ir
                     render_left = (
                         entry["rgb"][0]
                         .replace("frames_cleanpass", "frame_shaded")
@@ -287,13 +288,22 @@ class StereoDataset(EntityDataSet):
                         .replace("left", "right")
                     )
                     if os.path.exists(render_left) and os.path.exists(render_right):
-                        self.entries.append(
-                            EntityFlying3d(
-                                [render_left, render_right, *nir],
-                                entry["disparity"],
-                                shift_filter=self.args.shift_filter,
+                        while i >= 0:
+                            self.entries.append(
+                                EntityFlying3d(
+                                    [
+                                        render_left.replace(f"_{i+1}.png", f"_{i}.png"),
+                                        render_right.replace(
+                                            f"_{i+1}.png", f"_{i}.png"
+                                        ),
+                                        *nir,
+                                    ],
+                                    entry["disparity"],
+                                    shift_filter=self.args.shift_filter,
+                                )
                             )
-                        )
+                            i = i - 1
+                        break
 
             if self.args.noised_input:
                 for _ in range(5):

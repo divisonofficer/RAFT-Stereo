@@ -3,7 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from core.extractor import BasicEncoder
-from core.fusion import AttentionFeatureFusion
+from core.fusion import AttentionFeatureFusion, BAttentionFeatureFusion
+
 from core.raft_stereo import RAFTStereo
 
 
@@ -13,9 +14,11 @@ class HSVNet(torch.nn.Module):
         super(HSVNet, self).__init__()
 
         self.encoder = BasicEncoder(downsample=2, output_dim=256)
-        self.fusion = AttentionFeatureFusion(in_channels=256, reduction=4)
-        self.channel_reduction = nn.Conv2d(
-            in_channels=256, out_channels=2, kernel_size=1
+        self.fusion = BAttentionFeatureFusion(in_channels=256, reduction=4)
+        self.channel_reduction = nn.Sequential(
+            nn.Conv2d(256, 256, 3, padding=1),
+            nn.Conv2d(256, 2, 3, padding=1),
+            nn.ReLU(inplace=False),
         )
 
         self.raft_stereo = RAFTStereo(args)
@@ -221,7 +224,7 @@ class HSVNet(torch.nn.Module):
                 [hsv[:, :1], hsv[:, 1:2], w[:, :1] * hsv[:, 2:3] + w[:, 1:] * n], dim=1
             )
         )[:, :, :H, :W]
-        rgb = self.guided_filter(n[:, :, :H, :W], rgb) * 255
+        rgb = self.guided_filter(n[:, :, :H, :W], rgb, radius=5) * 255
 
         if raft_stereo:
             pd = 8

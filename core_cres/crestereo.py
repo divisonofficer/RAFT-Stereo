@@ -80,6 +80,10 @@ class CREStereo(nn.Module):
         return zero_flow
 
     def forward(self, image1, image2, iters=10, flow_init=None):
+        pad_w = (16 - (image1.shape[-1] % 16)) % 16
+        pad_h = (16 - (image1.shape[-2] % 16)) % 16
+        image1 = F.pad(image1, (0, pad_w, 0, pad_h))
+        image2 = F.pad(image2, (0, pad_w, 0, pad_h))
         image1 = 2 * (image1 / 255.0) - 1.0
         image2 = 2 * (image2 / 255.0) - 1.0
 

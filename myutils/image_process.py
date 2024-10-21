@@ -400,6 +400,7 @@ def image_disparity_shift(
     disparity: torch.Tensor,
     shift: int = 16,
     is_disparity: bool = False,
+    is_reproject: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Disparity 기반으로 이미지를 오른쪽 또는 왼쪽으로 이동시키고,
@@ -424,7 +425,9 @@ def image_disparity_shift(
     shift_map = disparity_normalized * shift  # Shape: (B, 1, H, W)
 
     if is_disparity:
-        image = image - torch.abs(shift_map) * 2  # Example operation for disparity maps
+        image = image - shift_map * (
+            2 if is_reproject else 1
+        )  # Example operation for disparity maps
 
     # shift_map을 x 축으로 변환 (픽셀 단위 -> [-1, 1] 범위)
     shift_normalized = (shift_map.squeeze(1) / (W - 1)) * 2  # Shape: (B, H, W)
@@ -497,7 +500,11 @@ def inputs_disparity_shift(
 
     # 왼쪽 disparity 맵 이동 (disparity 맵의 경우 is_disparity=True)
     disparity_shift_left, _ = image_disparity_shift(
-        disparity_map_left.clone(), disparity_map_left, shift=shift, is_disparity=True
+        disparity_map_left.clone(),
+        disparity_map_left,
+        shift=shift,
+        is_disparity=True,
+        is_reproject=True,
     )
 
     # 왼쪽 이미지를 오른쪽으로 워핑
@@ -517,6 +524,7 @@ def inputs_disparity_shift(
         disparity_map_right,
         shift=-shift,
         is_disparity=True,
+        is_reproject=True,
     )
 
     # 오른쪽 이미지를 왼쪽으로 워핑
