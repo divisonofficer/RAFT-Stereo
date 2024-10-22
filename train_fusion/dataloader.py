@@ -15,6 +15,8 @@ from myutils.image_process import (
     guided_filter,
     input_reduce_disparity,
     inputs_disparity_shift,
+    img_pad_np,
+    pseudo_nir_np,
 )
 import pfmread
 import cv2
@@ -73,11 +75,7 @@ class EntityFlying3d(Entity):
             img.shape[0] != self.cut_resolution[0]
             or img.shape[1] != self.cut_resolution[1]
         ):
-            w_f = int(img.shape[1] / 2 - self.cut_resolution[1] / 2)
-            h_f = int(img.shape[0] / 2 - self.cut_resolution[0] / 2)
-            w_t = int(img.shape[1] / 2 + self.cut_resolution[1] / 2)
-            h_t = int(img.shape[0] / 2 + self.cut_resolution[0] / 2)
-            img = img[h_f:h_t, w_f:w_t]
+            img = img_pad_np(img, pad_constant=np.inf if "disp" in filename else 0)
 
         return img
 
@@ -152,17 +150,16 @@ class EntityFlying3d(Entity):
         v = indices // self.cut_resolution[1]
 
         disparity = self.__to_tensor(self.disparity[0])
+
         disparity_right = self.__to_tensor(self.disparity[1])
         if self.shift_filter:
-            images, (disparity, _) = inputs_disparity_shift(
+            images, (disparity, disparity_right) = inputs_disparity_shift(
                 [x.unsqueeze(0) for x in images],
                 [disparity.unsqueeze(0), disparity_right.unsqueeze(0)],
                 self.shift_distance,
             )
             images = [x[0] for x in images]
-            disparity = disparity[0]
-            disparity_right = disparity[1]
-
+            disparity, disparity_right = [x[0] for x in [disparity, disparity_right]]
         if self.vertical_scale:
             images[0], images[1] = crop_and_resize_height(
                 torch.stack(images[:2], dim=0)
@@ -171,6 +168,10 @@ class EntityFlying3d(Entity):
                 torch.stack(images[2:4], dim=0)
             )
             disparity = crop_and_resize_height(disparity.unsqueeze(0))[0]
+            if self.disparity_right:
+                disparity_right = crop_and_resize_height(disparity_right.unsqueeze(0))[
+                    0
+                ]
 
         disparity_sampled = disparity[:, v, u]
         disparity_points = torch.stack((u, v, disparity_sampled[0]), dim=0).T.float()
@@ -231,6 +232,64 @@ class StereoDatasetArgs:
         self.disparity_right = disparity_right
 
 
+class Ethe3dEntity(Entity):
+    def __init__(self, path: str):
+        self.path = path
+
+    def get_item(self):
+        img_left = cv2.imread(os.path.join(self.path, "im0.png"))
+        img_right = cv2.imread(os.path.join(self.path, "im1.png"))
+        img_left_nir = pseudo_nir_np(img_left.copy())
+        img_right_nir = pseudo_nir_np(img_right.copy())
+        H, W = img_left.shape[:2]
+        H = min(H, 540)
+        W = min(W, 720)
+        occ_mask = cv2.imread(
+            os.path.join(self.path, "mask0nocc.png"), cv2.IMREAD_GRAYSCALE
+        )
+
+        disparity = pfmread.read(os.path.join(self.path, "disp0GT.pfm"))
+
+        images = [
+            torch.from_numpy(img_pad_np(x))
+            for x in [
+                img_left,
+                img_right,
+                img_left_nir,
+                img_right_nir,
+                disparity,
+                occ_mask,
+            ]
+        ]
+        disparity = images[4]
+        occ_mask = images[5]
+        disparity[occ_mask < 200] = torch.inf
+        indices = torch.randperm(H * W)[:5000]
+        u = indices % W
+        v = indices // W
+        disparity_sampled = disparity[v, u]
+        disparity = disparity.unsqueeze(0)
+        images[0] = images[0].permute(2, 0, 1)
+        images[1] = images[1].permute(2, 0, 1)
+        images[2] = images[2].unsqueeze(0)
+        images[3] = images[3].unsqueeze(0)
+
+        disparity_points = torch.stack((u, v, disparity_sampled), dim=0).T.float()
+        return (*images[:4], disparity_points, disparity)
+
+
+class Ethe3dStereo(EntityDataSet):
+    input_list: List[EntityFlying3d]
+
+    def __init__(self):
+        frames = []
+        for frame in os.listdir("/bean/eth3d/stereo"):
+            path_left = os.path.join("/bean/eth3d/stereo", frame, "im0.png")
+            if os.path.exists(path_left):
+                frames.append(Ethe3dEntity(os.path.dirname(path_left)))
+        self.input_list = random.sample(frames, len(frames))
+
+
 class StereoDataset(EntityDataSet):
     input_list: List[EntityFlying3d]
 
@@ -283,6 +342,8 @@ class StereoDataset(EntityDataSet):
                     )
                 )
             if self.args.rgb_rendered:
+                ir_gb = -1
+                ir_nir = -1
                 for ir in range(10):
                     i = 9 - ir
                     render_left = (
@@ -290,30 +351,47 @@ class StereoDataset(EntityDataSet):
                         .replace("frames_cleanpass", "frame_shaded")
                         .replace(".png", f"_{i}.png")
                     )
-                    render_right = (
+                    render_right = render_left.replace("left", "right")
+                    if os.path.exists(render_left) and os.path.exists(render_right):
+                        ir_gb = i
+                        break
+                for ir in range(10):
+                    i = 9 - ir
+                    render_left = (
+                        entry["rgb"][0]
+                        .replace("frames_cleanpass", "frame_shaded_nir")
+                        .replace(".png", f"_{i}.png")
+                    )
+                    render_right = render_left.replace("left", "right")
+                    if os.path.exists(render_left) and os.path.exists(render_right):
+                        ir_nir = i
+                        break
+                for ir in range(ir_gb):
+                    render = (
                         entry["rgb"][0]
                         .replace("frames_cleanpass", "frame_shaded")
-                        .replace(".png", f"_{i}.png")
-                        .replace("left", "right")
+                        .replace(".png", f"_{ir}.png")
                     )
-                    if os.path.exists(render_left) and os.path.exists(render_right):
-                        while i >= 0:
-                            self.entries.append(
-                                EntityFlying3d(
-                                    [
-                                        render_left.replace(f"_{i+1}.png", f"_{i}.png"),
-                                        render_right.replace(
-                                            f"_{i+1}.png", f"_{i}.png"
-                                        ),
-                                        *nir,
-                                    ],
-                                    entry["disparity"],
-                                    shift_filter=self.args.shift_filter,
-                                    disparity_right=self.args.disparity_right,
-                                )
+                    for inr in range(ir_nir):
+                        render_nir = (
+                            entry["rgb"][0]
+                            .replace("frames_cleanpass", "frame_shaded_nir")
+                            .replace(".png", f"_{inr}.png")
+                        )
+                        self.entries.append(
+                            EntityFlying3d(
+                                [
+                                    render,
+                                    render.replace("left", "right"),
+                                    render_nir,
+                                    render_nir.replace("left", "right"),
+                                ],
+                                entry["disparity"],
+                                shift_filter=self.args.shift_filter,
+                                disparity_right=self.args.disparity_right,
+                                vertical_scale=self.args.vertical_scale,
                             )
-                            i = i - 1
-                        break
+                        )
 
             if self.args.noised_input:
                 for _ in range(5):
@@ -330,46 +408,6 @@ class StereoDataset(EntityDataSet):
                                 disparity_right=self.args.disparity_right,
                             )
                         )
-
-            # for filter in [
-            #     "frame_burnt_filtered",
-            #     "frame_burnt_light_filtered",
-            #     "frame_darken_filtered",
-            #     "frame_darken_gain_filtered",
-            # ]:
-            #     if filter in entry:
-            #         filtered = entry[filter]
-            #     elif not os.path.exists(
-            #         entry["rgb"][0].replace("frames_cleanpass", filter)
-            #     ) or not os.path.exists(
-            #         entry["rgb"][1].replace("frames_cleanpass", filter)
-            #     ):
-            #         continue
-            #     else:
-            #         filtered = (
-            #             entry["rgb"][0].replace("frames_cleanpass", filter),
-            #             entry["rgb"][1].replace("frames_cleanpass", filter),
-            #         )
-            #         entry[filter] = filtered
-
-            #     self.entries.append(
-            #         EntityFlying3d([*filtered, *nir], entry["disparity"])
-            #     )
-            #     if self.args.noised_input:
-            #         for _ in range(2):
-            #             for t in ["rgb", "nir"]:
-            #                 self.entries.append(
-            #                     EntityFlying3d(
-            #                         [*filtered, *nir_ambient],
-            #                         entry["disparity"],
-            #                         guided_noise=int((random.random() * 100) % 20),
-            #                         gamma_noise=(random.random() * 2),
-            #                         shift_filter=self.args.shift_filter,
-            #                         vertical_scale=self.args.vertical_scale,
-            #                         noise_target=t,
-            #                     )
-            #                 )
-
             if validate:
                 validated = True
                 for key, value in entry.items():

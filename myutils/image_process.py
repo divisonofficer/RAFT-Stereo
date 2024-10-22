@@ -584,3 +584,37 @@ def inputs_disparity_shift(
     ]
 
     return corrected_inputs, corrected_disparities
+
+
+def pseudo_nir_np(rgb: np.ndarray):
+    if rgb.max() > 10:
+        rgb = rgb / 255.0
+    interm = np.maximum(rgb, 1 - rgb)
+
+    # Compute the weighted sum and apply the power operation
+    nir = (
+        interm[..., 0] * 0.229 + interm[..., 1] * 0.587 + interm[..., 2] * 0.114
+    ) ** (1 / 0.25)
+    return (nir * 255).astype(np.uint8)
+
+
+def img_pad_np(img: np.ndarray, shape=(540, 720), divd=16, pad_constant = 0):
+    H = shape[0] + (divd - (shape[0] % divd)) % divd
+    W = shape[1] + (divd - (shape[1] % divd)) % divd
+
+    if img.shape[0] > H:
+        img = img[(img.shape[0] - H) // 2 : (img.shape[0] + H) // 2]
+    if img.shape[1] > W:
+        img = img[:, (img.shape[1] - W) // 2 : (img.shape[1] + W) // 2]
+
+    if img.shape[0] < H or img.shape[1] < W:
+        img_cp = (
+            np.zeros((H, W), dtype=img.dtype)
+            if len(img.shape) == 2
+            else np.zeros((H, W, 3), dtype=img.dtype)
+        )
+        img_cp[:] = pad_constant
+
+        img_cp[: img.shape[0], : img.shape[1]] = img
+        return img_cp
+    return img

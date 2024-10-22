@@ -309,7 +309,7 @@ def gt_loss(model, flow_gt, flow_preds, loss_gamma=0.9, max_flow=700):
 
     _, _, h, w = flow_preds[-1].shape
     flow_gt = -flow_gt[:, :, :h, :w]
-    mask = flow_gt <= 0
+    mask = ~torch.isnan(flow_gt) & ~torch.isinf(flow_gt)
     for i in range(n_predictions):
         assert (
             not torch.isnan(flow_preds[i]).any()

@@ -141,6 +141,88 @@ class FusionBasicEncoder(nn.Module):
         return ret
 
 
+class Pyramid(nn.Module):
+    def __init__(
+        self,
+        output_dim=[128],
+        dropout=0.0,
+        norm_fn="batch",
+    ):
+        super(Pyramid, self).__init__()
+        self.in_planes = 128
+        self.layer4 = self._make_layer(128, stride=2)
+        self.layer5 = self._make_layer(128, stride=2)
+        self.norm_fn = norm_fn
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm)):
+                if m.weight is not None:
+                    nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+        output_list = []
+        for dim in output_dim:
+            conv_out = nn.Sequential(
+                ResidualBlock(128, 128, self.norm_fn, stride=1),
+                nn.Conv2d(128, dim[2], 3, padding=1),
+            )
+            output_list.append(conv_out)
+
+        self.outputs08 = nn.ModuleList(output_list)
+
+        output_list = []
+        for dim in output_dim:
+            conv_out = nn.Sequential(
+                ResidualBlock(128, 128, self.norm_fn, stride=1),
+                nn.Conv2d(128, dim[1], 3, padding=1),
+            )
+            output_list.append(conv_out)
+
+        self.outputs16 = nn.ModuleList(output_list)
+
+        output_list = []
+        for dim in output_dim:
+            conv_out = nn.Conv2d(128, dim[0], 3, padding=1)
+            output_list.append(conv_out)
+
+        self.outputs32 = nn.ModuleList(output_list)
+
+        if dropout > 0:
+            self.dropout = nn.Dropout2d(p=dropout)
+        else:
+            self.dropout = None
+
+    def _make_layer(self, dim, stride=1):
+        layer1 = ResidualBlock(self.in_planes, dim, self.norm_fn, stride=stride)
+        layer2 = ResidualBlock(dim, dim, self.norm_fn, stride=1)
+        layers = (layer1, layer2)
+
+        self.in_planes = dim
+        return nn.Sequential(*layers)
+
+    def forward(
+        self,
+        x,
+        num_layers=3,
+    ):
+        outputs08 = [f(x) for f in self.outputs08]
+        output_tuple = (outputs08,)
+
+        if num_layers >= 2:
+            y = self.layer4(x)
+            outputs16 = [f(y) for f in self.outputs16]
+            output_tuple += (outputs16,)
+
+        if num_layers == 3:
+            z = self.layer5(y)
+            outputs32 = [f(z) for f in self.outputs32]
+            output_tuple += (outputs32,)
+
+        return output_tuple
+
+
 class FusionMultiBasicEncoder(nn.Module):
     def __init__(
         self,
@@ -315,8 +397,9 @@ class FusionMultiBasicEncoder(nn.Module):
                 x_nir,
             )
         if debug_attention:
-            x_rgb, x_nir = self.fusion(x_viz, x_nir, debug_attention=True)[1:]
+            w, x_rgb, x_nir = self.fusion(x_viz, x_nir, debug_attention=True)
             output_tuple += (
+                w,
                 x_rgb,
                 x_nir,
             )

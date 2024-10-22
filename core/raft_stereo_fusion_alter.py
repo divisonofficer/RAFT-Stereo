@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from core.extractor_fusion import FusionMultiBasicEncoder
+from core.extractor_fusion import FusionMultiBasicEncoder, Pyramid
 from core.fusion import (
     AttentionFeatureFusion,
     BAttentionFeatureFusion,
+    ConcatFusion,
     IAttentionFeatureFusion,
 )
 from core.update import BasicMultiUpdateBlock
@@ -17,20 +18,7 @@ from core.corr import (
 )
 from core.utils.utils import coords_grid, upflow8
 
-
-try:
-    autocast = torch.cuda.amp.autocast
-except:
-    # dummy autocast for PyTorch < 1.6
-    class autocast:
-        def __init__(self, enabled):
-            pass
-
-        def __enter__(self):
-            pass
-
-        def __exit__(self, *args):
-            pass
+autocast = torch.cuda.amp.autocast
 
 
 class RAFTStereoFusionAlter(nn.Module):
@@ -50,13 +38,7 @@ class RAFTStereoFusionAlter(nn.Module):
         self.args = args
 
         context_dims = args.hidden_dims
-        self.cnet = FusionMultiBasicEncoder(
-            output_dim=[args.hidden_dims, context_dims],
-            norm_fn=args.context_norm,
-            downsample=args.n_downsample,
-            shared_extractor=args.shared_fusion,
-            fusion_module=self.define_fusion_layer(),
-        )
+
         self.update_block = BasicMultiUpdateBlock(
             self.args, hidden_dims=args.hidden_dims
         )
@@ -67,21 +49,34 @@ class RAFTStereoFusionAlter(nn.Module):
                 for i in range(self.args.n_gru_layers)
             ]
         )
-        # self.fnet = BasicEncoder(
-        #     output_dim=256, norm_fn="instance", downsample=args.n_downsample
-        # )
+        if not self.args.shared_backbone:
+            self.fnet = BasicEncoder(
+                output_dim=256, norm_fn="instance", downsample=args.n_downsample
+            )
 
-        # self.fusion = self.define_fusion_layer()(256)
-
-        self.conv2 = nn.Sequential(
-            ResidualBlock(128, 128, "instance", stride=1),
-            nn.Conv2d(128, 256, 3, padding=1),
-        )
+            self.fusion = self.define_fusion_layer()(256)
+            self.cnet = Pyramid(
+                output_dim=[args.hidden_dims, context_dims], norm_fn=args.context_norm
+            )
+        else:
+            self.cnet = FusionMultiBasicEncoder(
+                output_dim=[args.hidden_dims, context_dims],
+                norm_fn=args.context_norm,
+                downsample=args.n_downsample,
+                shared_extractor=args.shared_fusion,
+                fusion_module=self.define_fusion_layer(),
+            )
+            self.conv2 = nn.Sequential(
+                ResidualBlock(128, 128, "instance", stride=1),
+                nn.Conv2d(128, 256, 3, padding=1),
+            )
 
     def freeze_bn(self):
         for m in self.modules():
             if isinstance(m, nn.BatchNorm2d):
                 m.eval()
+                for _, param in m.named_parameters():
+                    param.requires_grad = False
 
     def freeze_raft(self):
         if "BatchNorm" in self.args.freeze_backbone:
@@ -157,30 +152,29 @@ class RAFTStereoFusionAlter(nn.Module):
 
         # run the context network
         with autocast(enabled=self.args.mixed_precision):
-            *cnet_list, x, x_rgb, x_nir = self.cnet(
-                torch.cat((img_rgb_l, img_rgb_r), dim=0),
-                torch.cat((img_nir_l, img_nir_r), dim=0),
-                dual_inp=True,
-                num_layers=self.args.n_gru_layers,
-                fmap_out=True,
-            )
-            fmap_fusion_l, fmap_fusion_r = self.conv2(x).split(
-                dim=0, split_size=x.shape[0] // 2
-            )
-            fmap_rgb_l, fmap_rgb_r = self.conv2(x_rgb).split(
-                dim=0, split_size=x.shape[0] // 2
-            )
-            fmap_nir_l, fmap_nir_r = self.conv2(x_nir).split(
-                dim=0, split_size=x.shape[0] // 2
-            )
-
-            # cnet_list = self.cnet(
-            #     img_rgb_l, img_nir_l, num_layers=self.args.n_gru_layers
-            # )
-            # fmap_rgb_l, fmap_rgb_r = self.fnet([img_rgb_l, img_rgb_r])
-            # fmap_nir_l, fmap_nir_r = self.fnet([img_nir_l, img_nir_r])
-            # fmap_fusion_l = self.fusion(fmap_rgb_l, fmap_rgb_r).half()
-            # fmap_fusion_r = self.fusion(fmap_rgb_r, fmap_nir_r)
+            if self.args.shared_backbone:
+                *cnet_list, x, x_rgb, x_nir = self.cnet(
+                    torch.cat((img_rgb_l, img_rgb_r), dim=0),
+                    torch.cat((img_nir_l, img_nir_r), dim=0),
+                    dual_inp=True,
+                    num_layers=self.args.n_gru_layers,
+                    fmap_out=True,
+                )
+                fmap_fusion_l, fmap_fusion_r = self.conv2(x).split(
+                    dim=0, split_size=x.shape[0] // 2
+                )
+                fmap_rgb_l, fmap_rgb_r = self.conv2(x_rgb).split(
+                    dim=0, split_size=x.shape[0] // 2
+                )
+                fmap_nir_l, fmap_nir_r = self.conv2(x_nir).split(
+                    dim=0, split_size=x.shape[0] // 2
+                )
+            else:
+                fmap_rgb_l, fmap_rgb_r = self.fnet([img_rgb_l, img_rgb_r])
+                fmap_nir_l, fmap_nir_r = self.fnet([img_nir_l, img_nir_r])
+                fmap_fusion_l = self.fusion(fmap_rgb_l, fmap_rgb_r)
+                fmap_fusion_r = self.fusion(fmap_rgb_r, fmap_nir_r)
+                cnet_list = self.cnet(fmap_fusion_l, num_layers=self.args.n_gru_layers)
             net_list = [torch.tanh(x[0]) for x in cnet_list]
             inp_list = [torch.relu(x[1]) for x in cnet_list]
 
@@ -214,12 +208,7 @@ class RAFTStereoFusionAlter(nn.Module):
             )
             corr_fn_list.append(corr_fn_fusion)
         if self.args.alter_option != "Fusion":
-            corr_fn_rgb = corr_block(
-                fmap_rgb_l,
-                fmap_rgb_r,
-                radius=self.args.corr_radius,
-                num_levels=self.args.corr_levels,
-            )
+
             corr_fn_nir = corr_block(
                 fmap_nir_l,
                 fmap_nir_r,
@@ -227,7 +216,14 @@ class RAFTStereoFusionAlter(nn.Module):
                 num_levels=self.args.corr_levels,
             )
             corr_fn_list.append(corr_fn_nir)
-            corr_fn_list.append(corr_fn_rgb)
+            if self.args.alter_option != "Nir":
+                corr_fn_rgb = corr_block(
+                    fmap_rgb_l,
+                    fmap_rgb_r,
+                    radius=self.args.corr_radius,
+                    num_levels=self.args.corr_levels,
+                )
+                corr_fn_list.append(corr_fn_rgb)
 
         coords0, coords1 = self.initialize_flow(net_list[0])
 

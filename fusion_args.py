@@ -37,7 +37,7 @@ class FusionArgs:
         self.log_level = "logging.INFO"
         self.n_total_epoch = 10
 
-        self.alter_option: Literal["Fusion", "Origin", "Mixed"] = "Mixed"
+        self.alter_option: Literal["Fusion", "Origin", "Mixed", "Nir"] = "Mixed"
 
     @property
     def hidden_dims(self):
