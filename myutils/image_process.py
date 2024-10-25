@@ -598,7 +598,7 @@ def pseudo_nir_np(rgb: np.ndarray):
     return (nir * 255).astype(np.uint8)
 
 
-def img_pad_np(img: np.ndarray, shape=(540, 720), divd=16, pad_constant = 0):
+def img_pad_np(img: np.ndarray, shape=(540, 720), divd=16, pad_constant=False):
     H = shape[0] + (divd - (shape[0] % divd)) % divd
     W = shape[1] + (divd - (shape[1] % divd)) % divd
 
@@ -613,7 +613,8 @@ def img_pad_np(img: np.ndarray, shape=(540, 720), divd=16, pad_constant = 0):
             if len(img.shape) == 2
             else np.zeros((H, W, 3), dtype=img.dtype)
         )
-        img_cp[:] = pad_constant
+        if pad_constant:
+            img_cp[:] = 1000000
 
         img_cp[: img.shape[0], : img.shape[1]] = img
         return img_cp

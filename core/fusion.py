@@ -3,23 +3,49 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class FixedBatchNorm2d(nn.Module):
+    def __init__(self, num_features, eps=1e-2):
+        super(FixedBatchNorm2d, self).__init__()
+        self.eps = eps  # 안정성을 위한 작은 값
+        self.num_features = num_features  # 채널 수
+
+    def forward(self, x):
+        assert (
+            x.size(1) == self.num_features
+        ), f"입력의 채널 수가 {self.num_features}와 일치하지 않습니다."
+        # 배치와 공간 차원(H, W)을 따라 평균과 분산 계산 (채널별)
+        mean = x.mean(dim=(0, 2, 3), keepdim=True)  # (1, C, 1, 1)
+        var = x.var(dim=(0, 2, 3), keepdim=True, unbiased=False)  # (1, C, 1, 1)
+
+        # sqrt를 사용하지 않고 rsqrt로 정규화
+        inv_std = torch.rsqrt(var + self.eps)  # (1, C, 1, 1)
+
+        # 정규화 수행 (weight=1, bias=0)
+        x_normalized = (x - mean) * inv_std
+        return x_normalized
+
+
 class LocalAttentionModule(nn.Module):
     def __init__(self, in_channels, reduction=16):
         super(LocalAttentionModule, self).__init__()
         self.local_conv1 = nn.Conv2d(
             in_channels, in_channels // reduction, kernel_size=1
         )
-        self.local_bn1 = nn.BatchNorm2d(in_channels // reduction)
+        self.local_bn1 = nn.BatchNorm2d(
+            in_channels // reduction, track_running_stats=False
+        )
         self.local_relu = nn.ReLU(inplace=False)
         self.local_conv2 = nn.Conv2d(
             in_channels // reduction, in_channels, kernel_size=1
         )
-        self.local_bn2 = nn.BatchNorm2d(in_channels)
+        self.local_bn2 = nn.BatchNorm2d(in_channels, track_running_stats=False)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm)):
+            elif isinstance(
+                m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm, nn.SyncBatchNorm)
+            ):
                 if m.weight is not None:
                     nn.init.constant_(m.weight, 1)
                 if m.bias is not None:
@@ -47,17 +73,24 @@ class GlobalAttentionModule(nn.Module):
         self.global_conv1 = nn.Conv2d(
             in_channels, in_channels // reduction, kernel_size=1
         )
-        self.global_bn1 = nn.BatchNorm2d(in_channels // reduction)
+        self.global_bn1 = nn.BatchNorm2d(
+            in_channels // reduction, track_running_stats=False, eps=0.001
+        )
         self.global_relu = nn.ReLU(inplace=False)
         self.global_conv2 = nn.Conv2d(
             in_channels // reduction, in_channels, kernel_size=1
         )
-        self.global_bn2 = nn.BatchNorm2d(in_channels)
+        self.global_bn2 = nn.BatchNorm2d(
+            in_channels, track_running_stats=False, eps=0.001
+        )
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm)):
+                nn.init.xavier_normal_(m.weight)
+                m.weight.data *= 0.1
+            elif isinstance(
+                m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm, nn.SyncBatchNorm)
+            ):
                 if m.weight is not None:
                     nn.init.constant_(m.weight, 1)
                 if m.bias is not None:
@@ -65,7 +98,7 @@ class GlobalAttentionModule(nn.Module):
 
     def forward(self, x):
         # Global average pooling branch
-        avg_pool = self.global_avg_pool(x)
+        avg_pool = self.global_avg_pool(x).float()
 
         # First branch
 

@@ -149,14 +149,17 @@ class Pyramid(nn.Module):
         norm_fn="batch",
     ):
         super(Pyramid, self).__init__()
+        self.norm_fn = norm_fn
         self.in_planes = 128
         self.layer4 = self._make_layer(128, stride=2)
         self.layer5 = self._make_layer(128, stride=2)
-        self.norm_fn = norm_fn
+
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm)):
+            elif isinstance(
+                m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm, nn.SyncBatchNorm)
+            ):
                 if m.weight is not None:
                     nn.init.constant_(m.weight, 1)
                 if m.bias is not None:
@@ -285,7 +288,9 @@ class FusionMultiBasicEncoder(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm)):
+            elif isinstance(
+                m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm, nn.SyncBatchNorm)
+            ):
                 if m.weight is not None:
                     nn.init.constant_(m.weight, 1)
                 if m.bias is not None:

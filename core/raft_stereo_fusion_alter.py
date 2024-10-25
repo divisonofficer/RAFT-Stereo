@@ -33,6 +33,21 @@ class RAFTStereoFusionAlter(nn.Module):
             return BAttentionFeatureFusion
         return AttentionFeatureFusion
 
+    def checknan(self, item, tag="NAN is here"):
+        if isinstance(item, list) or isinstance(item, tuple):
+            for i in item:
+                if self.checknan(i, tag):
+                    break
+
+        if torch.isnan(item).any():
+            print(f"{tag} shows nan value")
+            print(item)
+            return True
+        if torch.isinf(item).any():
+            print(f"{tag} shows inf value")
+            return True
+        return False
+
     def __init__(self, args):
         super().__init__()
         self.args = args
@@ -58,6 +73,10 @@ class RAFTStereoFusionAlter(nn.Module):
             self.cnet = Pyramid(
                 output_dim=[args.hidden_dims, context_dims], norm_fn=args.context_norm
             )
+            self.conv_pyramid = nn.Sequential(
+                ResidualBlock(256, 256, "instance", stride=1),
+                nn.Conv2d(256, 128, 3, padding=1),
+            )
         else:
             self.cnet = FusionMultiBasicEncoder(
                 output_dim=[args.hidden_dims, context_dims],
@@ -73,7 +92,7 @@ class RAFTStereoFusionAlter(nn.Module):
 
     def freeze_bn(self):
         for m in self.modules():
-            if isinstance(m, nn.BatchNorm2d):
+            if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
                 m.eval()
                 for _, param in m.named_parameters():
                     param.requires_grad = False
@@ -81,7 +100,7 @@ class RAFTStereoFusionAlter(nn.Module):
     def freeze_raft(self):
         if "BatchNorm" in self.args.freeze_backbone:
             self.freeze_bn()
-        if "Extractor" in self.args.freeze_backbone:
+        if "Extractor" in self.args.freeze_backbone and self.args.shared_backbone:
             self.cnet.freeze_raft()
 
         if self.args.shared_backbone:
@@ -95,6 +114,9 @@ class RAFTStereoFusionAlter(nn.Module):
         if "Volume" in self.args.freeze_backbone:
             self.context_zqr_convs.eval()
             for name, param in self.context_zqr_convs.named_parameters():
+                param.requires_grad = False
+            self.cnet.eval()
+            for name, param in self.cnet.named_parameters():
                 param.requires_grad = False
         if "Updater" in self.args.freeze_backbone:
             self.update_block.eval()
@@ -141,6 +163,7 @@ class RAFTStereoFusionAlter(nn.Module):
         img_rgb_r = (2 * (img_rgb_r / 255.0) - 1.0).contiguous()
         img_nir_l = (2 * (img_nir_l / 255.0) - 1.0).contiguous()
         img_nir_r = (2 * (img_nir_r / 255.0) - 1.0).contiguous()
+
         if img_rgb_l.shape[1] == 1:
             img_rgb_l = img_rgb_l.repeat(1, 3, 1, 1)
         if img_rgb_r.shape[1] == 1:
@@ -152,6 +175,7 @@ class RAFTStereoFusionAlter(nn.Module):
 
         # run the context network
         with autocast(enabled=self.args.mixed_precision):
+
             if self.args.shared_backbone:
                 *cnet_list, x, x_rgb, x_nir = self.cnet(
                     torch.cat((img_rgb_l, img_rgb_r), dim=0),
@@ -170,11 +194,22 @@ class RAFTStereoFusionAlter(nn.Module):
                     dim=0, split_size=x.shape[0] // 2
                 )
             else:
+
                 fmap_rgb_l, fmap_rgb_r = self.fnet([img_rgb_l, img_rgb_r])
                 fmap_nir_l, fmap_nir_r = self.fnet([img_nir_l, img_nir_r])
-                fmap_fusion_l = self.fusion(fmap_rgb_l, fmap_rgb_r)
-                fmap_fusion_r = self.fusion(fmap_rgb_r, fmap_nir_r)
-                cnet_list = self.cnet(fmap_fusion_l, num_layers=self.args.n_gru_layers)
+
+                fmap_fusion = self.fusion(
+                    torch.concat([fmap_rgb_l, fmap_rgb_r], dim=0),
+                    torch.concat([fmap_nir_l, fmap_nir_r], dim=0),
+                )
+                fmap_fusion_l, fmap_fusion_r = fmap_fusion.split(
+                    dim=0, split_size=fmap_rgb_l.shape[0]
+                )
+                fmap_fusion_128 = self.conv_pyramid(fmap_fusion_l)
+                cnet_list = self.cnet(
+                    fmap_fusion_128, num_layers=self.args.n_gru_layers
+                )
+
             net_list = [torch.tanh(x[0]) for x in cnet_list]
             inp_list = [torch.relu(x[1]) for x in cnet_list]
 

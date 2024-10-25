@@ -75,8 +75,7 @@ class EntityFlying3d(Entity):
             img.shape[0] != self.cut_resolution[0]
             or img.shape[1] != self.cut_resolution[1]
         ):
-            img = img_pad_np(img, pad_constant=np.inf if "disp" in filename else 0)
-
+            img = img_pad_np(img, pad_constant="disp" in filename)
         return img
 
     def __to_tensor(self, filename: Union[str, np.ndarray]):
@@ -88,6 +87,7 @@ class EntityFlying3d(Entity):
         tensor = torch.from_numpy(img.copy())
         if tensor.dim() == 2:
             return tensor.unsqueeze(0).float()
+
         return tensor.permute(2, 0, 1).float()
 
     def get_item(
@@ -339,6 +339,7 @@ class StereoDataset(EntityDataSet):
                         [*entry["rgb"], *nir],
                         entry["disparity"],
                         disparity_right=self.args.disparity_right,
+                        shift_filter=self.args.shift_filter,
                     )
                 )
             if self.args.rgb_rendered:
