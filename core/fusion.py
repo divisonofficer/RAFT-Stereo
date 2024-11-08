@@ -216,3 +216,11 @@ class ConcatFusion(nn.Module):
 
     def forward(self, rgb, nir):
         return self.conv1(torch.cat((rgb, nir), dim=1))
+
+
+class AdditionFusion(nn.Module):
+    def __init__(self, in_channels=128, reduction=4):
+        super(AdditionFusion, self).__init__()
+
+    def forward(self, rgb, nir):
+        return (rgb + nir) / 2

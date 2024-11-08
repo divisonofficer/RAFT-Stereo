@@ -103,12 +103,18 @@ class Logger:
 
     SUM_FREQ = 10
 
-    def __init__(self, model, scheduler):
+    def __init__(self, model, scheduler, log_dir="runs"):
         self.model = model
         self.scheduler = scheduler
         self.total_steps = 0
         self.running_loss = {}
-        self.writer = SummaryWriter(log_dir="runs")
+        self.writer = SummaryWriter(log_dir=log_dir)
+
+    def key_valid(self, key):
+        if "valid_" in key:
+            return key.replace("valid_", "valid/")
+        else:
+            return f"train/{key}"
 
     def _print_training_status(self):
         metrics_data = [
@@ -140,21 +146,37 @@ class Logger:
         self.total_steps += 1
 
         for key in metrics:
+            metric = metrics[key]
+            key = self.key_valid(key)
             if key not in self.running_loss:
                 self.running_loss[key] = 0.0
 
-            self.running_loss[key] += metrics[key]
+            self.running_loss[key] += metric
 
         if self.total_steps % Logger.SUM_FREQ == Logger.SUM_FREQ - 1:
             self._print_training_status()
             self.running_loss = {}
+
+    def write_scalar(self, key, scalar, steps=None):
+        if steps is None:
+            steps = self.total_steps
+        key = self.key_valid(key)
+        self.writer.add_scalar(key, scalar, steps)
 
     def write_dict(self, results):
         if self.writer is None:
             self.writer = SummaryWriter(log_dir="runs")
 
         for key in results:
-            self.writer.add_scalar(key, results[key], self.total_steps)
+            value = results[key]
+            key = self.key_valid(key)
+            self.writer.add_scalar(key, value, self.total_steps)
+
+    def add_figure(self, key: str, image: np.ndarray, steps=None):
+        if steps is None:
+            steps = self.total_steps
+        key = self.key_valid(key)
+        self.writer.add_figure(key, image, self.total_steps)
 
     def close(self):
         self.writer.close()

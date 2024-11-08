@@ -296,55 +296,6 @@ class FusionMultiBasicEncoder(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def _load_from_state_dict(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        encoder_exists = (
-            len([key for key in state_dict if "module.cnet.encoder." in key]) > 0
-        )
-
-        if not encoder_exists:
-            keys = list(state_dict.keys())
-            for key in keys:
-                if "module.cnet." in key:
-                    key_encoder = key.replace("module.cnet.", "module.cnet.encoder.")
-                    state_dict[key_encoder] = state_dict[key]
-                    if not self.shared_extractor:
-                        key_encoder = key.replace(
-                            "module.cnet.", "module.cnet.encoder2."
-                        )
-                        state_dict[key_encoder] = state_dict[key]
-
-        ret = super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
-
-        return ret
-
-    def load_state_dict(
-        self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False
-    ):
-        ret = super().load_state_dict(state_dict, strict, assign)
-        print(state_dict)
-        if "encoder" not in state_dict:
-            self.encoder.load_state_dict(state_dict, strict, assign)
-            if not self.shared_extractor:
-                self.encoder2.load_state_dict(state_dict, strict, assign)
-        return ret
-
     def freeze_raft(self):
         layer_list = [
             self.encoder,

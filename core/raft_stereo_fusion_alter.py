@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from core.extractor_fusion import FusionMultiBasicEncoder, Pyramid
 from core.fusion import (
+    AdditionFusion,
     AttentionFeatureFusion,
     BAttentionFeatureFusion,
     ConcatFusion,
@@ -31,6 +32,9 @@ class RAFTStereoFusionAlter(nn.Module):
             return IAttentionFeatureFusion
         if self.args.fusion == "bAFF":
             return BAttentionFeatureFusion
+        if self.args.fusion == "add":
+            return AdditionFusion
+
         return AttentionFeatureFusion
 
     def checknan(self, item, tag="NAN is here"):
@@ -68,6 +72,11 @@ class RAFTStereoFusionAlter(nn.Module):
             self.fnet = BasicEncoder(
                 output_dim=256, norm_fn="instance", downsample=args.n_downsample
             )
+
+            if not self.args.shared_fusion:
+                self.fnet_nir = BasicEncoder(
+                    output_dim=256, norm_fn="instance", downsample=args.n_downsample
+                )
 
             self.fusion = self.define_fusion_layer()(256)
             self.cnet = Pyramid(
@@ -196,7 +205,10 @@ class RAFTStereoFusionAlter(nn.Module):
             else:
 
                 fmap_rgb_l, fmap_rgb_r = self.fnet([img_rgb_l, img_rgb_r])
-                fmap_nir_l, fmap_nir_r = self.fnet([img_nir_l, img_nir_r])
+                if self.args.shared_fusion:
+                    fmap_nir_l, fmap_nir_r = self.fnet([img_nir_l, img_nir_r])
+                else:
+                    fmap_nir_l, fmap_nir_r = self.fnet_nir([img_nir_l, img_nir_r])
 
                 fmap_fusion = self.fusion(
                     torch.concat([fmap_rgb_l, fmap_rgb_r], dim=0),

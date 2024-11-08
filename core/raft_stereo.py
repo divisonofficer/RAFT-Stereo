@@ -66,7 +66,7 @@ class RAFTStereo(nn.Module):
 
     def freeze_bn(self):
         for m in self.modules():
-            if isinstance(m, nn.BatchNorm2d):
+            if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
                 m.eval()
 
     def initialize_flow(self, img):
