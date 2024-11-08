@@ -49,8 +49,10 @@ class CREStereo(nn.Module):
 
     def freeze_bn(self):
         for m in self.modules():
-            if isinstance(m, nn.BatchNorm2d):
+            if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
                 m.eval()
+                for _, param in m.named_parameters():
+                    param.requires_grad = False
 
     def unfold(self, x, kernel_size, dilation=1, padding=0, stride=1):
         return F.unfold(
