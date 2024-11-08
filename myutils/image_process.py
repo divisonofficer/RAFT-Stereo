@@ -1,3 +1,4 @@
+import os
 import random
 from typing import Tuple, List
 import cv2
@@ -95,6 +96,9 @@ def read_image_pair(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     ret = []
     for path in ["rgb/left.png", "rgb/right.png", "nir/left.png", "nir/right.png"]:
+
+        if not os.path.exists(f"{frame_path}/{path}"):
+            path = path.replace(".png", "_distorted.png")
         img = cv2.imread(
             f"{frame_path}/{path}",
             cv2.IMREAD_GRAYSCALE if "nir" in path else cv2.IMREAD_COLOR,
@@ -598,7 +602,7 @@ def pseudo_nir_np(rgb: np.ndarray):
     return (nir * 255).astype(np.uint8)
 
 
-def img_pad_np(img: np.ndarray, shape=(540, 720), divd=16, pad_constant=False):
+def img_pad_np(img: np.ndarray, shape=(540, 720), divd=32, pad_constant=False):
     H = shape[0] + (divd - (shape[0] % divd)) % divd
     W = shape[1] + (divd - (shape[1] % divd)) % divd
 

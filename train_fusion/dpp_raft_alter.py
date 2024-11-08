@@ -1,5 +1,5 @@
 import random
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import os
@@ -23,8 +23,8 @@ except ImportError:
     os.chdir("/RAFT-Stereo")
     from core.raft_stereo_fusion_alter import RAFTStereoFusionAlter
 from fusion_args import FusionArgs
-from train_fusion.ddp import DDPTrainer
-from torch.nn.parallel import DistributedDataParallel as DDP
+from train_fusion.dpp import DPPTrainer
+from torch.nn.parallel import DataParallel
 from train_fusion.ddp_loss import SelfLoss
 from train_fusion.dataloader import EntityDataSet, StereoDataset, StereoDatasetArgs
 from train_fusion.loss_function import (
@@ -40,21 +40,21 @@ from train_fusion.my_h5_dataloader import MyH5DataSet, MyRefinedH5DataSet
 import matplotlib.pyplot as plt
 
 
-class RaftTrainer(DDPTrainer):
+class RaftTrainer(DPPTrainer):
     def __init__(self):
         args = FusionArgs()
-        args.restore_ckpt = "models/raftstereo-realtime.pth"
-        args.restore_ckpt = "checkpoints/latest_ConcatAlterFnetShared.pth"
+        args.restore_ckpt = "models/raftstereo-middlebury.pth"
+        args.restore_ckpt = "checkpoints/latest_AFFAlterShared.pth"
         args.n_gru_layers = 3
         args.n_downsample = 2
-        args.batch_size = 12
+        args.batch_size = 8
         args.valid_steps = 100
         args.lr = 0.00001
         args.train_iters = 5
         args.valid_iters = 7
         args.logger_dir = "runs_raft"
-        args.fusion = "ConCat"
-        args.name = "ConcatAlterFnetShared"
+        args.fusion = "AFF"
+        args.name = "AFFAlterFnetShared"
         args.alter_option = "Nir"
         args.mixed_precision = True
         args.shared_fusion = True
@@ -63,12 +63,12 @@ class RaftTrainer(DDPTrainer):
         args.real_input_only = True
         # args.self_supervised_train = True
         self.grad_scale = 128
-        args.freeze_backbone = ["Extractor", "BatchNorm", "Updater"]  # , "Volume"]
+        args.freeze_backbone = ["Extractor", "BatchNorm", "Updater", "Volume"]
         # args.freeze_backbone = ["BatchNorm"]
         super().__init__(args)
 
     def init_models(self) -> Module:
-        model = RAFTStereoFusionAlter(self.args).to(self.device)
+        model: Module = RAFTStereoFusionAlter(self.args).cuda()
         if self.args.restore_ckpt.isdigit():
             self.args.restore_ckpt = (
                 f"checkpoints/{self.args.restore_ckpt}_{self.args.name}.pth"
@@ -80,15 +80,10 @@ class RaftTrainer(DDPTrainer):
         is_module = "module." in list(w_dict.keys())[0]
         if not is_module:
             model.load_state_dict(w_dict, strict=False)
-        model = DDP(
-            model,
-            device_ids=[self.local_rank],
-            output_device=self.local_rank,
-            find_unused_parameters=True,
-        )
+        model = DataParallel(model, device_ids=[0, 1, 2])
         if is_module:
-            model.load_state_dict(w_dict, strict=False)
 
+            print(model.load_state_dict(w_dict, strict=False))
         return model
 
     def train_mode(self):
@@ -97,7 +92,7 @@ class RaftTrainer(DDPTrainer):
 
     def init_dataloader(
         self,
-    ):
+    ) -> Tuple[DataLoader, DataLoader]:
         #
         # dataset = MyRefinedH5DataSet(use_right_shift=False)
         dataset = MyH5DataSet(
@@ -149,29 +144,25 @@ class RaftTrainer(DDPTrainer):
             )
         else:
             dataset_train = EntityDataSet(
-                dataset_driving.input_list[: int(len(dataset_driving))]
-                + dataset_flying.input_list[: int(len(dataset_flying) // 5)]
+                dataset.input_list[:train_cnt]
+                # dataset_driving.input_list[: int(len(dataset_driving))]
+                # + dataset_flying.input_list[: int(len(dataset_flying) // 5)]
             )
-        train_sampler = DistributedSampler(dataset_train)
-        valid_sampler = DistributedSampler(dataset_valid)
+        print(len(dataset_train))
         return (
-            train_sampler,
-            valid_sampler,
             DataLoader(
                 dataset_train,
                 batch_size=self.args.batch_size,
-                sampler=train_sampler,
-                num_workers=1,
+                num_workers=6,
             ),
             DataLoader(
                 dataset_valid,
-                batch_size=1,
-                sampler=valid_sampler,
+                batch_size=3,
                 num_workers=1,
             ),
         )
 
-    def create_image_figure(self, image, cmap=None, vmax=48):
+    def create_image_figure(self, image, cmap=None, vmax=64):
         fig, ax = plt.subplots()
         if image.ndim > 3:
             image = image[0]
@@ -183,32 +174,97 @@ class RaftTrainer(DDPTrainer):
             ax.imshow(image.astype(np.uint8))
         return fig
 
-    def log_figures(self, idx: int, batch: List[torch.Tensor]):
-        left_rgb, right_rgb, left_nir, right_nir, _, disp_gt = [
-            x.to(self.device) for x in batch
-        ]
-        with torch.no_grad():
-            _, flow = self.model(
-                left_rgb, right_rgb, left_nir, right_nir, iters=7, test_mode=True
-            )
-        flow = flow[:, :, :540, :720]
+    def log_figures(self, idx: int, batch: List[torch.Tensor], train_outputs: Dict):
+        left_rgb, right_rgb, left_nir, right_nir, _, disp_gt = [x.cuda() for x in batch]
+        flows = train_outputs["flow"]
         idx = self.total_steps
-        right_rgb_warped = self.self_loss.disocc_detection(flow, left_rgb)[1]
-        ssim_loss = ssim_torch(right_rgb, right_rgb_warped)
-        self.logger.add_figure(
-            "disparity",
-            self.create_image_figure(-flow[0, 0].cpu().numpy(), "magma"),
-            idx,
+        right_warped = self.self_loss.warp(
+            torch.concat([left_rgb, left_nir], dim=1), flows[-1]
         )
+        ssim_loss = ssim_torch(right_rgb, right_warped[:, :3])
+        for idx, flow in enumerate(flows):
+            self.logger.add_figure(
+                f"disparity_{idx}",
+                self.create_image_figure(-flow[0, 0].cpu().numpy(), "jet"),
+                idx,
+            )
+        if "flow_right" in train_outputs:
+            for idx, flow in enumerate(train_outputs["flow_right"]):
+                self.logger.add_figure(
+                    f"disparity_right_{idx}",
+                    self.create_image_figure(-flow[0, 0].cpu().numpy(), "jet"),
+                    idx,
+                )
+            left_warped = self.self_loss.warp(
+                torch.concat([right_rgb, right_nir], dim=1),
+                -train_outputs["flow_right"][-1],
+            )
+            train_outputs["inputs_left_warped"] = left_warped
+
+            with torch.no_grad():
+                flow_warped = self.model.module(
+                    left_warped[:, :3],
+                    right_rgb,
+                    left_warped[:, 3:4],
+                    right_nir,
+                )
+            train_outputs["flow_warped"] = flow_warped
+
+        if "flow_warped" in train_outputs:
+            for idx, flow in enumerate(train_outputs["flow_warped"]):
+                self.logger.add_figure(
+                    f"disparity_warped_{idx // (self.args.train_iters * 2)}_{idx % (self.args.train_iters * 2)}",
+                    self.create_image_figure(-flow[0, 0].cpu().numpy(), "jet"),
+                    idx,
+                )
+
+        if "inputs_left_warped" in train_outputs:
+            self.logger.add_figure(
+                "rgb_warped_and_original",
+                self.create_image_figure(
+                    torch.concat(
+                        [
+                            torch.concat(
+                                [
+                                    train_outputs["inputs_left_warped"][0, :3],
+                                    left_rgb[0],
+                                ],
+                                dim=-1,
+                            ),
+                            torch.concat(
+                                [
+                                    right_rgb[0],
+                                    right_warped[0, :3],
+                                ],
+                                dim=-1,
+                            ),
+                        ],
+                        dim=-2,
+                    )
+                ),
+                idx,
+            )
+            self.logger.add_figure(
+                "left_rgb_warped",
+                self.create_image_figure(train_outputs["inputs_left_warped"][0, :3]),
+                idx,
+            )
+            self.logger.add_figure(
+                "left_nir_warped",
+                self.create_image_figure(train_outputs["inputs_left_warped"][0, 3:4]),
+                idx,
+            )
         self.logger.add_figure(
             "disparity_gt",
-            self.create_image_figure(disp_gt[0, 0].cpu().numpy(), "magma"),
+            self.create_image_figure(disp_gt[0, 0].cpu().numpy(), "jet"),
             idx,
         )
         self.logger.add_figure("left_rgb", self.create_image_figure(left_rgb[0]), idx)
         self.logger.add_figure("right_rgb", self.create_image_figure(right_rgb[0]), idx)
+        self.logger.add_figure("left_nir", self.create_image_figure(left_nir[0]), idx)
+        self.logger.add_figure("right_nir", self.create_image_figure(right_nir[0]), idx)
         self.logger.add_figure(
-            "right_rgb_warped", self.create_image_figure(right_rgb_warped[0]), idx
+            "right_rgb_warped", self.create_image_figure(right_warped[0, :3]), idx
         )
 
         self.logger.add_figure(
@@ -294,22 +350,38 @@ class RaftTrainer(DDPTrainer):
         return loss_fn
 
     def process_batch(self, data_blob):
-        inputs = [x.to(self.device).to(torch.float32) for x in data_blob]
+        inputs = [x.cuda().to(torch.float32) for x in data_blob]
         target_gt = inputs[-2]
         disp_gt = inputs[-1]
         total_loss = 0
-        i = random.randint(0, 3)
-        # r_n = i % 2
-        # n_n = i // 2
-        r_n = 0
-        n_n = 0
-        flow = self.model(
-            inputs[2 * r_n],
-            inputs[1 + 2 * n_n],
-            inputs[2 * (1 - r_n)],
-            inputs[1 + 2 * (1 - n_n)],
-            iters=7,
-        )
+
+        if self.args.self_supervised_train:
+            B = inputs[0].shape[0]
+            input_flipped = [torch.flip(img, [-1]) for img in inputs[:4]]
+            flow_combined = self.model(
+                *[
+                    torch.concat([x, y], dim=0)
+                    for x, y in zip(
+                        inputs[:4],
+                        [
+                            input_flipped[1],
+                            input_flipped[0],
+                            input_flipped[3],
+                            input_flipped[2],
+                        ],
+                    )
+                ],
+                iters=self.args.train_iters,
+            )
+            flow = [x[:B] for x in flow_combined]
+            flow_right = [torch.flip(x[B:], dims=[-1]) for x in flow_combined]
+            flow = flow + flow_right
+        else:
+            flow = self.model(
+                *inputs[:4],
+                iters=self.args.train_iters,
+            )
+
         loss, metrics = self.loss_fn(
             flow,
             inputs[:4],
@@ -317,22 +389,30 @@ class RaftTrainer(DDPTrainer):
             disp_gt,
             True,
             lidar_loss=False,
-            self_loss=False,
+            self_loss=self.args.self_supervised_train,
         )
         total_loss += loss
-        return total_loss, metrics
+        output_dict = (
+            {
+                "flow": [x.detach() for x in flow[: self.args.train_iters * 2]],
+                "flow_right": [x.detach() for x in flow_right],
+            }
+            if self.args.self_supervised_train
+            else {"flow": [x.detach() for x in flow]}
+        )
+        return total_loss, metrics, output_dict
 
     @torch.no_grad()
     def validate(self, model, valid_loader: DataLoader):
         model.eval()
         metrics: Dict[str, torch.Tensor] = {}
         losses = []
-        with torch.amp.autocast(enabled=self.args.mixed_precision):
+        with torch.cuda.amp.autocast(enabled=self.args.mixed_precision):
             for i_batch, input_valid in enumerate(tqdm.tqdm(valid_loader)):
-                inputs = [x.to(self.device).to(torch.float32) for x in input_valid]
+                inputs = [x.cuda().to(torch.float32) for x in input_valid]
                 target_gt = inputs[-2]
                 disp_gt = inputs[-1]
-                flow = model(*inputs[:4], iters=7)
+                flow = model(*inputs[:4], iters=self.args.valid_iters)
 
                 loss, metric = self.loss_fn(
                     flow, inputs[:4], target_gt, disp_gt, False, True, True
@@ -341,7 +421,7 @@ class RaftTrainer(DDPTrainer):
                 for k, v in metric.items():
                     k = f"valid_{k}"
                     if k not in metrics:
-                        metrics[k] = torch.tensor(0.0).to(self.device)
+                        metrics[k] = torch.tensor(0.0).cuda()
                     metrics[k] += v / len(valid_loader)
                 losses.append(loss.item())
 

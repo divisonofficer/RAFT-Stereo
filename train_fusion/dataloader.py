@@ -17,6 +17,7 @@ from myutils.image_process import (
     inputs_disparity_shift,
     img_pad_np,
     pseudo_nir_np,
+    read_image_pair,
 )
 import pfmread
 import cv2
@@ -55,6 +56,7 @@ class EntityFlying3d(Entity):
         vertical_scale=False,
         noise_target: Literal["rgb", "nir"] = "rgb",
         disparity_right=False,
+        rgb_gt: Optional[Tuple[str]] = None,
     ):
         self.images = images
         self.disparity = disparity
@@ -65,6 +67,7 @@ class EntityFlying3d(Entity):
         self.noise_target = noise_target
         self.shift_distance = random.randint(8, 16)
         self.disparity_right = disparity_right
+        self.rgb_gt = rgb_gt
 
     def __read_img(self, filename):
         if filename.endswith(".pfm"):
@@ -152,12 +155,26 @@ class EntityFlying3d(Entity):
         disparity = self.__to_tensor(self.disparity[0])
 
         disparity_right = self.__to_tensor(self.disparity[1])
+        if self.rgb_gt is not None:
+            image_gt = [self.__to_tensor(self.__read_img(x)) for x in self.rgb_gt]
+            images += image_gt
         if self.shift_filter:
+            images = [x.unsqueeze(0) for x in images]
+            if self.rgb_gt is not None:
+                images[0] = torch.concat([images[0], images[4]], dim=1)
+                images[1] = torch.concat([images[1], images[5]], dim=1)
+                images = images[:4]
             images, (disparity, disparity_right) = inputs_disparity_shift(
-                [x.unsqueeze(0) for x in images],
+                images,
                 [disparity.unsqueeze(0), disparity_right.unsqueeze(0)],
                 self.shift_distance,
             )
+            if self.rgb_gt is not None:
+                images.append(images[0][:, 3:6])
+                images.append(images[1][:, 3:6])
+                images[0] = images[0][:, :3]
+                images[1] = images[1][:, :3]
+
             images = [x[0] for x in images]
             disparity, disparity_right = [x[0] for x in [disparity, disparity_right]]
         if self.vertical_scale:
@@ -167,21 +184,20 @@ class EntityFlying3d(Entity):
             images[2], images[3] = crop_and_resize_height(
                 torch.stack(images[2:4], dim=0)
             )
+            if self.rgb_gt is not None:
+                images[4:6] = crop_and_resize_height(torch.stack(images[4:6], dim=0))
+
             disparity = crop_and_resize_height(disparity.unsqueeze(0))[0]
             if self.disparity_right:
                 disparity_right = crop_and_resize_height(disparity_right.unsqueeze(0))[
                     0
                 ]
-
         disparity_sampled = disparity[:, v, u]
         disparity_points = torch.stack((u, v, disparity_sampled[0]), dim=0).T.float()
         if self.disparity_right:
             disparity = torch.concat([disparity, disparity_right], dim=0)
         batch = [
-            images[0],
-            images[1],
-            images[2],
-            images[3],
+            *images,
             disparity_points,
             disparity,
         ]
@@ -217,6 +233,7 @@ class StereoDatasetArgs:
         vertical_scale=False,
         rgb_rendered=False,
         disparity_right=False,
+        rgb_gt=False,
     ):
         self.folder = folder
         self.flow3d_driving_json = flow3d_driving_json
@@ -230,6 +247,7 @@ class StereoDatasetArgs:
         self.vertical_scale = vertical_scale
         self.rgb_rendered = rgb_rendered
         self.disparity_right = disparity_right
+        self.rgb_gt = rgb_gt
 
 
 class Ethe3dEntity(Entity):
@@ -321,7 +339,11 @@ class StereoDataset(EntityDataSet):
 
             if self.args.synth_no_filter and "frame_burnt_filtered" in entry:
                 continue
-            if self.args.fast_test and idx > 100:
+            if (
+                self.args.fast_test
+                and len(self.entries) > 50000
+                or (len(self.entries) > 10000 and idx > 1000)
+            ):
                 break
 
             if "nir" in entry:
@@ -336,10 +358,11 @@ class StereoDataset(EntityDataSet):
             if not self.args.synth_no_rgb:
                 self.entries.append(
                     EntityFlying3d(
-                        [*entry["rgb"], *nir],
+                        [*entry["rgb"], *nir_ambient],
                         entry["disparity"],
                         disparity_right=self.args.disparity_right,
                         shift_filter=self.args.shift_filter,
+                        rgb_gt=entry["rgb"] if self.args.rgb_gt else None,
                     )
                 )
             if self.args.rgb_rendered:
@@ -391,6 +414,12 @@ class StereoDataset(EntityDataSet):
                                 shift_filter=self.args.shift_filter,
                                 disparity_right=self.args.disparity_right,
                                 vertical_scale=self.args.vertical_scale,
+                                guided_noise=(
+                                    random.randint(3, 8)
+                                    if self.args.noised_input
+                                    else None
+                                ),
+                                rgb_gt=entry["rgb"] if self.args.rgb_gt else None,
                             )
                         )
 
@@ -405,8 +434,9 @@ class StereoDataset(EntityDataSet):
                                 gamma_noise=(random.random() * 2),
                                 shift_filter=self.args.shift_filter,
                                 vertical_scale=self.args.vertical_scale,
-                                noise_target=t,
+                                # noise_target=t,
                                 disparity_right=self.args.disparity_right,
+                                rgb_gt=entry["rgb"] if self.args.rgb_gt else None,
                             )
                         )
             if validate:

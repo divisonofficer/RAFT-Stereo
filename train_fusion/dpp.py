@@ -7,10 +7,9 @@ from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
 import torch
-import torch.distributed as dist
 from torch import nn, optim
-from torch.utils.data import DataLoader, DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+
 from torch.amp import GradScaler
 
 from fusion_args import FusionArgs
@@ -20,18 +19,14 @@ from tqdm import tqdm
 logging.basicConfig(level=logging.INFO)
 
 
-class DDPTrainer:
+class DPPTrainer:
     def __init__(self, args: FusionArgs):
         self.args = args
-        self.local_rank = int(os.environ["LOCAL_RANK"])
-        self.device = torch.device(f"cuda:{self.local_rank}")
+
         self.total_steps = 0
         self.should_keep_training = True
         self.global_batch_num = 0
 
-        # DDP 초기화
-        torch.cuda.set_device(self.local_rank)
-        dist.init_process_group(backend="nccl")
         torch.autograd.set_detect_anomaly(True)
 
         # 신호 처리 핸들러 설정
@@ -39,31 +34,20 @@ class DDPTrainer:
 
         self.model = self.init_models()
 
-        self.train_sampler, self.valid_sampler, self.train_loader, self.valid_loader = (
-            self.init_dataloader()
-        )
+        self.train_loader, self.valid_loader = self.init_dataloader()
         self.train_mode()
         self.init_optimizers()
         self.loss_fn = self.init_loss_function()
         # rank 0에서만 로거 초기화
-        if dist.get_rank() == 0:
-            self.logger = Logger(
-                self.model.module, self.scheduler, log_dir=self.args.log_dir
-            )
-            self.logger.total_steps = self.total_steps
+        self.logger = Logger(self.model.module, self.scheduler, self.args.log_dir)
+        self.logger.total_steps = self.total_steps
 
     def signal_handler(self, sig, frame):
-        print(f"Process {dist.get_rank()} received signal {sig}")
-        if dist.get_rank() == 0:
-            print("Interrupt received. Saving model and performing validation...")
-            torch.save(self.model.module.state_dict(), "interrupted_model.pth")
-            self.validate(self.model.module, self.valid_loader)
-        dist.barrier()
-        self.cleanup()
+        print(f"Process  received signal {sig}")
+        print("Interrupt received. Saving model and performing validation...")
+        torch.save(self.model.module.state_dict(), "interrupted_model.pth")
+        self.validate(self.model.module, self.valid_loader)
         sys.exit(0)
-
-    def cleanup(self):
-        dist.destroy_process_group()
 
     def init_models(self) -> nn.Module:
         """모델을 초기화합니다."""
@@ -71,7 +55,7 @@ class DDPTrainer:
 
     def init_dataloader(
         self,
-    ) -> Tuple[DistributedSampler, DistributedSampler, DataLoader, DataLoader]:
+    ) -> Tuple[DataLoader, DataLoader]:
         """데이터 로더를 초기화합니다."""
         raise NotImplementedError("데이터 로더 초기화 메소드를 재정의해야 합니다.")
 
@@ -98,50 +82,81 @@ class DDPTrainer:
             cycle_momentum=False,
             anneal_strategy="linear",
         )
-        self.scaler = GradScaler(enabled=self.args.mixed_precision, init_scale=1024)
+        self.scaler = GradScaler(
+            enabled=self.args.mixed_precision, init_scale=self.args.grad_scale
+        )
 
     def train_mode(self):
         self.model.train()
 
-    def log_figures(self, idx: int, batch: List[torch.Tensor]):
+    def log_figures(self, idx: int, batch: List[torch.Tensor], train_outputs: Dict):
         """텐서보드에 이미지 기록"""
         raise NotImplementedError("이미지 기록 메소드를 재정의해야 합니다 ")
+
+    def _safe_scaler_step(self):
+        """GradScaler가 NaN 문제를 감지했을 때 안전하게 Optimizer 스텝을 건너뛰기."""
+        try:
+            # Optimizer의 step을 시도
+            self.scaler.step(self.optimizer)
+            return True  # 성공적으로 스텝 수행 시 True 반환
+        except RuntimeError as e:
+            # NaN 발생 시 경고 출력 후 스텝 건너뛰기
+            print(f"Optimizer step skipped due to NaN: {e}")
+            return False  # NaN 문제 발생 시 False 반환
 
     def train(self):
         """학습 과정을 정의합니다."""
         self.train_mode()
-
         while self.should_keep_training:
-            self.train_sampler.set_epoch(self.total_steps)
             for i_batch, data_blob in enumerate(tqdm(self.train_loader)):
                 try:
-                    self.optimizer.zero_grad()
-                    loss, metrics = self.process_batch(data_blob)
 
-                    # 손실 및 메트릭을 모든 프로세스에서 합산
-                    dist.all_reduce(loss, op=dist.ReduceOp.SUM)
-                    loss = loss / dist.get_world_size()
-
-                    for k in metrics:
-                        dist.all_reduce(metrics[k], op=dist.ReduceOp.SUM)
-                        metrics[k] = metrics[k] / dist.get_world_size()
-
-                    if dist.get_rank() == 0:
+                    try:
+                        loss, metrics, output_dict = self.process_batch(data_blob)
                         self.log_metrics(loss, metrics)
-                    self.scaler.scale(loss).backward()
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                    self.scaler.step(self.optimizer)
-                    self.scheduler.step()
-                    self.scaler.update()
+                        # 손실 스케일링 후 역전파 수행
+                        self.scaler.scale(loss).backward()
+                    except AssertionError as e:
+                        print(f"Assert Error detect {e}")
+                        self.optimizer.zero_grad()  # 기울기 초기화
+                        if self.total_steps % 10 == 0:
+                            self.log_figures(i_batch, data_blob, output_dict)
+                        continue  # 문제 발생 시 이 배치를 건너뜀
+                    except RuntimeError as e:
+                        print(
+                            f"NaN encountered during backward at batch {i_batch}: {e}"
+                        )
+                        self.optimizer.zero_grad()  # 기울기 초기화
+                        if self.total_steps % 10 == 0:
+                            self.log_figures(i_batch, data_blob, output_dict)
+                        continue  # 문제 발생 시 이 배치를 건너뜀
 
-                    if self.total_steps % 10 == 0 and dist.get_rank() == 0:
-                        self.log_figures(i_batch, data_blob)
+                    # 마지막 누적 단계일 때만 업데이트 수행
+                    if (i_batch + 1) % self.args.accumulation_steps == 0:
+                        # Unscale gradients for numerical stability
+                        self.scaler.unscale_(self.optimizer)
+
+                        # Gradient Clipping 수행
+                        torch.nn.utils.clip_grad_norm_(
+                            filter(lambda p: p.requires_grad, self.model.parameters()),
+                            1.0,
+                        )
+
+                        # Optimizer step을 안전하게 시도
+                        scaler_step_successful = self._safe_scaler_step()
+
+                        if scaler_step_successful:
+                            # Scheduler 업데이트 및 기울기 초기화
+                            self.scheduler.step()
+                            self.scaler.update()
+                        else:
+                            print(f"Warning : Scaler Step Failed on {i_batch}")
+                        self.optimizer.zero_grad()
+
+                    if self.total_steps % 10 == 0:
+                        self.log_figures(i_batch, data_blob, output_dict)
                     self.total_steps += 1
-                    if (
-                        dist.get_rank() == 0
-                        and self.total_steps % self.args.valid_steps == 0
-                    ):
+                    if self.total_steps % self.args.valid_steps == 0:
                         self.save_model_checkpoint()
                         self.run_validation()
 
@@ -150,13 +165,12 @@ class DDPTrainer:
                         break
 
                 except Exception as e:
-                    print(f"Exception occurred in process {dist.get_rank()}: {e}")
+                    print(f"Exception occurred in process : {e}")
                     traceback.print_exc()
                     self.should_keep_training = False
                     break
 
-        if dist.get_rank() == 0:
-            self.save_final_model()
+        self.save_final_model()
 
     def process_batch(self, data_blob) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """배치 데이터 처리 및 손실 계산"""

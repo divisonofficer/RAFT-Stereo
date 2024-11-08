@@ -22,11 +22,11 @@ class FusionArgs:
         self._train_iters = 7
         self._valid_iters = 12
         self._wdecay = 0.0001
-        self._num_steps = 100000
+        self._num_steps = 500000
         self._valid_steps = 1000
         self._name = "StereoFusion"
         self._batch_size = 4
-        self._fusion: Literal["AFF", "ConCat", "iAFF", "bAFF"] = "AFF"
+        self._fusion: Literal["AFF", "ConCat", "iAFF", "bAFF", "add"] = "AFF"
         self._shared_fusion = False
         self._freeze_backbone: List[
             Literal["Extractor", "Updater", "Volume", "BatchNorm"]
@@ -36,8 +36,11 @@ class FusionArgs:
         self.log_dir = "./train_log"
         self.log_level = "logging.INFO"
         self.n_total_epoch = 10
-
+        self.accumulation_steps = 5
         self.alter_option: Literal["Fusion", "Origin", "Mixed", "Nir"] = "Mixed"
+        self.self_supervised_train = False
+        self.grad_scale = 512
+        self.real_input_only = False
 
     @property
     def hidden_dims(self):
@@ -216,7 +219,7 @@ class FusionArgs:
         return self._fusion
 
     @fusion.setter
-    def fusion(self, value: Literal["AFF", "ConCat", "iAFF", "bAFF"]):
+    def fusion(self, value: Literal["AFF", "ConCat", "iAFF", "bAFF", "add"]):
         self._fusion = value
 
     @property

@@ -46,19 +46,20 @@ class RaftTrainer(DDPTrainer):
     def __init__(self):
 
         args = FusionArgs()
-        args.restore_ckpt = "models/raftstereo-eth3d.pth"
-        # args.restore_ckpt = "checkpoints/latest_HSVFusionSynth.pth"
+        # args.restore_ckpt = "models/raftstereo-eth3d.pth"
+        args.restore_ckpt = "checkpoints/latest_HSVFusionResReal.pth"
         args.shared_backbone = True
         args.n_gru_layers = 2
         args.n_downsample = 3
         args.batch_size = 6
         args.valid_steps = 100
         args.lr = 0.00001
+        args.real_input_only = True
         # args.corr_implementation = "reg"
         args.log_dir = "runs_hsv"
-        args.name = "HSVFusionRes"
+        args.name = "HSVFusionResReal"
         args.shared_fusion = True
-        args.mixed_precision = False
+        args.mixed_precision = True
         args.freeze_backbone = ["Extractor", "Updater", "Volume", "BatchNorm"]
         self.args = args
         super().__init__(args)
@@ -74,7 +75,12 @@ class RaftTrainer(DDPTrainer):
             find_unused_parameters=True,
         )
         print(model.module.encoder.conv1.state_dict()["weight"][0])
-        model.load_state_dict(torch.load(self.args.restore_ckpt), strict=False)
+        w_dict = torch.load(self.args.restore_ckpt)
+        if "total_steps" in w_dict:
+            self.total_steps = w_dict["total_steps"]
+            w_dict = w_dict["model_state_dict"]
+
+        model.module.load_state_dict(w_dict, strict=True)
         print(model.module.encoder.conv1.state_dict()["weight"][0])
         checkpoint = torch.load("models/raftstereo-realtime.pth")
 
@@ -119,17 +125,17 @@ class RaftTrainer(DDPTrainer):
             bpnet_gt=True,
             scene_list=[
                 "10-08-10-39-20",
-                "09-08-17-27-33",
-                "09-28-17-34-59",
-                "09-28-21-15-50",
+                # "09-08-17-27-33",
+                # "09-28-17-34-59",
+                # "09-28-21-15-50",
                 "10-08-10-26-23",
                 "10-08-10-34-37",
                 "10-06-18-27-51",
                 "10-01-16-20-28",
                 "10-01-16-03-50",
                 "09-09-20-04-34",
-                "09-09-19-46-45",
-                "09-20-13-50-44",
+                # "09-09-19-46-45",
+                # "09-20-13-50-44",
             ],
         )
         # dataset_refined = MyRefinedH5DataSet(use_right_shift=True)
@@ -139,6 +145,8 @@ class RaftTrainer(DDPTrainer):
                 shift_filter=True,
                 noised_input=False,
                 rgb_rendered=True,
+                rgb_gt=False,
+                fast_test=True,
             )
         )
 
@@ -148,15 +156,17 @@ class RaftTrainer(DDPTrainer):
                 shift_filter=True,
                 noised_input=False,
                 rgb_rendered=True,
+                rgb_gt=False,
+                fast_test=True,
             )
         )
 
         dataset_train = EntityDataSet(
-            input_list=dataset.input_list[100:]
-            + dataset_flying.input_list[:50000]
-            + dataset_drive.input_list[:50000]
+            dataset_flying.input_list[:10000]
+            + dataset_drive.input_list[:20000]
+            + dataset.input_list[50:]
         )
-        dataset_valid = EntityDataSet(input_list=dataset.input_list[:100])
+        dataset_valid = EntityDataSet(input_list=dataset.input_list[:50])
         print(len(dataset_valid))
         train_sampler = DistributedSampler(dataset_train)
         valid_sampler = DistributedSampler(dataset_valid)
@@ -174,15 +184,18 @@ class RaftTrainer(DDPTrainer):
                 batch_size=2,
                 sampler=valid_sampler,
                 num_workers=1,
+                drop_last=True,
             ),
         )
 
     def create_image_figure(self, image, cmap=None):
         fig, ax = plt.subplots()
+        if image.device != "cpu":
+            image = image.cpu()
         if image.ndim > 3:
             image = image[0]
         if image.shape[0] < 100:
-            image = image.permute(1, 2, 0).cpu().numpy()
+            image = image.permute(1, 2, 0).numpy()
         if cmap is not None:
             ax.imshow(image, cmap=cmap, vmin=0, vmax=64)
         else:
@@ -190,76 +203,79 @@ class RaftTrainer(DDPTrainer):
         return fig
 
     def log_figures(self, idx: int, batch: List[torch.Tensor]):
-        *inputs, _, disp_gt = batch
-        rgb = torch.concat([inputs[0], inputs[1]], dim=3)
-        nir = torch.concat([inputs[2], inputs[3]], dim=3)
+        rgb = torch.concat([batch[0], batch[1]], dim=3)
+        nir = torch.concat([batch[2], batch[3]], dim=3)
         with torch.no_grad():
             fusion, flow = self.model(rgb, nir)
             flow_rgb = self.model.module.raft_stereo(
-                inputs[0].cuda(), inputs[1].cuda(), test_mode=True
+                batch[0].cuda(), batch[1].cuda(), test_mode=True
             )[1]
             flow_nir = self.model.module.raft_stereo(
-                inputs[2].cuda().repeat(1, 3, 1, 1),
-                inputs[3].cuda().repeat(1, 3, 1, 1),
+                batch[2].cuda().repeat(1, 3, 1, 1),
+                batch[3].cuda().repeat(1, 3, 1, 1),
                 test_mode=True,
             )[1]
 
+        val_head = "valid_" if idx < 0 else ""
+        if idx < 0:
+            idx = -idx
+
         self.logger.add_figure(
-            "disparity",
+            val_head + "disparity",
             self.create_image_figure(-flow[-1][0, 0].cpu().numpy(), "magma"),
             idx,
         )
         self.logger.add_figure(
-            "disparity_rgb",
+            val_head + "disparity_rgb",
             self.create_image_figure(-flow_rgb[0, 0].cpu().numpy(), "magma"),
             idx,
         )
         self.logger.add_figure(
-            "disparity_rgb",
+            val_head + "disparity_rgb",
             self.create_image_figure(-flow_nir[0, 0].cpu().numpy(), "magma"),
             idx,
         )
 
-        self.logger.add_figure("rgb", self.create_image_figure(rgb), idx)
-        self.logger.add_figure("nir", self.create_image_figure(nir), idx)
-        self.logger.add_figure("fusion", self.create_image_figure(fusion), idx)
+        self.logger.add_figure(val_head + "rgb", self.create_image_figure(rgb), idx)
+        self.logger.add_figure(val_head + "nir", self.create_image_figure(nir), idx)
+        self.logger.add_figure(
+            val_head + "fusion", self.create_image_figure(fusion), idx
+        )
+
+        if len(batch) > 5 and not self.args.real_input_only:
+            self.logger.add_figure(
+                val_head + "rgb_gt",
+                self.create_image_figure(torch.concat(batch[4:6], dim=-1)),
+                idx,
+            )
+
+    def loss_fn_gt(self, flow: List[torch.Tensor], disparity_gt: torch.Tensor):
+        return gt_loss(None, disparity_gt, flow)
 
     def init_loss_function(self) -> Callable[..., Any]:
         self.self_loss = SelfLoss()
 
         def loss_fn(
-            fusion: torch.Tensor,
-            flow: torch.Tensor,
-            inputs: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-            target_gt: torch.Tensor,
-            disparity_gt: torch.Tensor,
+            fusion: Tuple[torch.Tensor],
+            flow: List[torch.Tensor],
+            rgb_gt: Tuple[torch.Tensor],
+            flow_gt: torch.Tensor,
+            use_color_loss=True,
         ):
-            b, c, h, w = inputs[0].shape
-            fusion_left, fusion_right = torch.split(fusion, w, -1)
-            concat_left = torch.cat([inputs[0], inputs[2], fusion_left], dim=1)
-            concat_right = torch.cat([inputs[1], inputs[3], fusion_right], dim=1)
-            loss_warp, metric = self.self_loss.compute_losses(
-                concat_left, concat_right, flow
-            )
-
-            loss_expo = (torch.abs(fusion_left - fusion_right) / 255).mean()
-            loss_hdr = DynamicRangeLoss()(fusion)
-
-            loss_bright = torch.clip(96 - fusion.mean(), 0, 64) + torch.clip(
-                fusion.mean() - 210, 0, 64
-            )
-            # target_gt[..., 2] = -target_gt[..., 2]
-            epe, metric_gt = gt_loss(None, disparity_gt, flow)
-
-            metric["exposure_balance"] = loss_expo
-            metric["hdr_range"] = loss_hdr
-            metric["brighness_center"] = loss_bright
-            for k, v in metric_gt.items():
+            loss, metric = gt_loss(None, flow_gt, flow)
+            if use_color_loss:
+                color_l1 = (
+                    torch.abs(fusion[0] - rgb_gt[0]).mean()
+                    + torch.abs(fusion[1] - rgb_gt[1]).mean()
+                )
+                metric["color_l1"] = color_l1
+                loss = loss + color_l1 * 0.1
+            for k, v in metric.items():
                 if not isinstance(v, torch.Tensor):
                     v = torch.tensor(v, device=flow[-1].device)
                 metric[k] = v
 
-            return loss_warp + loss_expo + loss_bright / 100 + epe, metric
+            return loss, metric
 
         return loss_fn
 
@@ -270,9 +286,15 @@ class RaftTrainer(DDPTrainer):
 
         rgb = torch.concat([inputs[0], inputs[1]], dim=3)
         nir = torch.concat([inputs[2], inputs[3]], dim=3)
-        fusion, flow = self.model(rgb, nir)
+        fusion, flow = self.model(rgb, nir, raft_stereo=True)
 
-        loss, metrics = self.loss_fn(fusion, flow, inputs[:4], target_gt, disp_gt)
+        loss, metrics = self.loss_fn(
+            torch.split(fusion, fusion.shape[-1] // 2, -1),
+            flow,
+            inputs[4:6],
+            disp_gt,
+            use_color_loss=not self.args.real_input_only,
+        )
         return loss, metrics
 
     def validate(self, model, valid_loader: DataLoader):
@@ -287,15 +309,16 @@ class RaftTrainer(DDPTrainer):
                 rgb = torch.concat([inputs[0], inputs[1]], dim=3)
                 nir = torch.concat([inputs[2], inputs[3]], dim=3)
                 fusion, flow = self.model(rgb, nir)
-                loss, metric = self.loss_fn(
-                    fusion, flow, inputs[:4], target_gt, disp_gt
-                )
+                loss, metric = self.loss_fn_gt(flow, disp_gt)
                 for k, v in metric.items():
                     k = f"valid_{k}"
                     if k not in metrics:
                         metrics[k] = torch.tensor(0.0).to(self.device)
                     metrics[k] += float(v) / len(valid_loader)
                 losses.append(loss.item())
+
+                if i_batch % 5 == 0:
+                    self.log_figures(-self.total_steps - i_batch, input_valid[:4])
 
         loss = sum(losses) / len(losses)
 

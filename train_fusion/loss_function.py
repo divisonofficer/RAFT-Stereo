@@ -335,9 +335,10 @@ def gt_loss(model, flow_gt, flow_preds, loss_gamma=0.9, max_flow=700):
         )
 
         flow_loss += i_weight * i_loss.mean()
-    flow_preds[-1][~mask] = 0
-    flow_gt[~mask] = 0
-    epe = torch.sum((flow_preds[-1] - flow_gt) ** 2, dim=1).sqrt()
+    # flow_preds[-1][~mask] = 0
+    # flow_gt[~mask] = 0
+    epe = torch.sqrt((flow_preds[-1] - flow_gt) ** 2)
+    epe = epe[mask]
     epe = epe.view(-1)
 
     metrics = {

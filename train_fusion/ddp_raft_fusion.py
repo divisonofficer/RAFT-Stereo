@@ -177,27 +177,23 @@ class RaftTrainer(DDPTrainer):
         idx = self.total_steps
         right_rgb_warped = self.self_loss.disocc_detection(flow, left_rgb)[1]
         ssim_loss = ssim_torch(right_rgb, right_rgb_warped)
-        self.logger.writer.add_figure(
+        self.logger.add_figure(
             "disparity",
             self.create_image_figure(-flow[0, 0].cpu().numpy(), "magma"),
             idx,
         )
-        self.logger.writer.add_figure(
+        self.logger.add_figure(
             "disparity_gt",
             self.create_image_figure(disp_gt[0, 0].cpu().numpy(), "magma"),
             idx,
         )
-        self.logger.writer.add_figure(
-            "left_rgb", self.create_image_figure(left_rgb[0]), idx
-        )
-        self.logger.writer.add_figure(
-            "right_rgb", self.create_image_figure(right_rgb[0]), idx
-        )
-        self.logger.writer.add_figure(
+        self.logger.add_figure("left_rgb", self.create_image_figure(left_rgb[0]), idx)
+        self.logger.add_figure("right_rgb", self.create_image_figure(right_rgb[0]), idx)
+        self.logger.add_figure(
             "right_rgb_warped", self.create_image_figure(right_rgb_warped[0]), idx
         )
 
-        self.logger.writer.add_figure(
+        self.logger.add_figure(
             "right_warp_ssim",
             self.create_image_figure(ssim_loss[0, 0].cpu().numpy(), "OrRd", vmax=1),
             idx,

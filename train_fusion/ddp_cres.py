@@ -49,13 +49,13 @@ class RaftTrainer(DDPTrainer):
         args.n_downsample = 2
         args.batch_size = 3
         args.valid_steps = 100
-        args.lr = 0.001
+        args.lr = 0.00001
         args.train_iters = 7
         args.valid_iters = 7
         args.logger_dir = "runs_raft"
         args.fusion = "bAFF"
         args.name = "CREStereo"
-
+        args.num_steps = 400000
         args.shared_fusion = True
         args.shared_backbone = False
 
@@ -76,6 +76,7 @@ class RaftTrainer(DDPTrainer):
             is_module = "module." in list(w_dict.keys())[0]
             if not is_module:
                 model.load_state_dict(w_dict, strict=False)
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = DDP(
             model,
             device_ids=[self.local_rank],
@@ -84,13 +85,13 @@ class RaftTrainer(DDPTrainer):
         )
         if self.args.restore_ckpt is not None:
             if is_module:
-                model.load_state_dict(w_dict, strict=False)
+                keys = model.load_state_dict(w_dict, strict=False)
 
         return model
 
     def train_mode(self):
         self.model.train()
-        # self.model.module.freeze_raft()
+        self.model.module.freeze_bn()
 
     def init_dataloader(
         self,
@@ -138,13 +139,13 @@ class RaftTrainer(DDPTrainer):
                 dataset_train,
                 batch_size=self.args.batch_size,
                 sampler=train_sampler,
-                num_workers=2,
+                num_workers=1,
             ),
             DataLoader(
                 dataset_valid,
                 batch_size=3,
                 sampler=valid_sampler,
-                num_workers=2,
+                num_workers=1,
             ),
         )
 
@@ -165,31 +166,28 @@ class RaftTrainer(DDPTrainer):
             x.to(self.device) for x in batch
         ]
         with torch.no_grad():
-            flow = self.model(left_rgb, right_rgb)[-1][:, :, :540, :720]
+            flows = self.model(left_rgb, right_rgb)
         idx = self.total_steps
-        right_rgb_warped = self.self_loss.disocc_detection(flow, left_rgb)[1]
+        right_rgb_warped = self.self_loss.disocc_detection(flows[-1], left_rgb)[1]
         ssim_loss = ssim_torch(right_rgb, right_rgb_warped)
-        self.logger.writer.add_figure(
-            "disparity",
-            self.create_image_figure(-flow[0, 0].cpu().numpy(), "magma"),
-            idx,
-        )
-        self.logger.writer.add_figure(
+        for i, flow in enumerate(flows):
+            self.logger.add_figure(
+                f"disparity_pred_{i}",
+                self.create_image_figure(flow[0, 0].cpu().numpy(), "magma"),
+                idx,
+            )
+        self.logger.add_figure(
             "disparity_gt",
             self.create_image_figure(disp_gt[0, 0].cpu().numpy(), "magma"),
             idx,
         )
-        self.logger.writer.add_figure(
-            "left_rgb", self.create_image_figure(left_rgb[0]), idx
-        )
-        self.logger.writer.add_figure(
-            "right_rgb", self.create_image_figure(right_rgb[0]), idx
-        )
-        self.logger.writer.add_figure(
+        self.logger.add_figure("left_rgb", self.create_image_figure(left_rgb[0]), idx)
+        self.logger.add_figure("right_rgb", self.create_image_figure(right_rgb[0]), idx)
+        self.logger.add_figure(
             "right_rgb_warped", self.create_image_figure(right_rgb_warped[0]), idx
         )
 
-        self.logger.writer.add_figure(
+        self.logger.add_figure(
             "right_warp_ssim",
             self.create_image_figure(ssim_loss[0, 0].cpu().numpy(), "OrRd", vmax=1),
             idx,
@@ -214,8 +212,9 @@ class RaftTrainer(DDPTrainer):
                 x[:, :, : rgb_left[0].shape[-2], : rgb_left[0].shape[-1]] for x in flow
             ]
             if disp_loss:
+                disparity_gt[:, 1] = 0
                 try:
-                    disparity_loss, dis_metric = gt_loss(None, disparity_gt, flow)
+                    disparity_loss, dis_metric = gt_loss(None, -disparity_gt, flow)
                     for k, v in dis_metric.items():
                         if not isinstance(v, torch.Tensor):
                             v = torch.tensor(v, device=flow[-1].device)
@@ -226,7 +225,7 @@ class RaftTrainer(DDPTrainer):
                     self.log_figures(
                         self.total_steps, [*inputs, target_gt, disparity_gt]
                     )
-            flow = [x[:, 0] for x in flow]
+            flow = [-x[:, :1] for x in flow]
             if lidar_loss:
                 target_gt[..., 2] = -target_gt[..., 2]
                 depth_loss, depth_loss_last = loss_fn_depth_gt_box(
@@ -259,8 +258,14 @@ class RaftTrainer(DDPTrainer):
         total_loss = 0
         i = random.randint(0, 3)
         r_n = i % 2
-        n_n = i % 2
-        flow = self.model(inputs[0], inputs[1])
+        n_n = i // 2
+        left = inputs[n_n * 2]
+        right = inputs[1 + (r_n) * 2]
+        if left.shape[1] == 1:
+            left = left.repeat(1, 3, 1, 1)
+        if right.shape[1] == 1:
+            right = right.repeat(1, 3, 1, 1)
+        flow = self.model(left, right)
         loss, metrics = self.loss_fn(
             flow,
             inputs[:4],

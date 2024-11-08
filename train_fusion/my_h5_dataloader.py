@@ -10,6 +10,7 @@ from tqdm import tqdm
 import numpy as np
 
 from myutils.hy5py import calibration_property, read_lidar
+from myutils.image_process import img_pad_np
 from myutils.matrix import rmse_loss
 from myutils.points import (
     combine_disparity_by_edge,
@@ -28,17 +29,24 @@ from train_fusion.dataloader import Entity, EntityDataSet
 
 class MyH5Entity(Entity):
     def __init__(
-        self, h5_path, frame_path, shift: Optional[int] = None, is_refined_gt=False
+        self,
+        h5_path,
+        frame_path,
+        shift: Optional[int] = None,
+        is_refined_gt=False,
+        bpnet_gt=False,
     ):
         self.h5_path = h5_path
         self.frame_path = frame_path
         self.shift = shift
         self.is_refined_gt = is_refined_gt
+        self.bpnet_gt = bpnet_gt
 
     def imread(self, path: str, gray=False):
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE if gray else cv2.IMREAD_ANYCOLOR)
         if not gray:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = img_pad_np(img)
         tensor = torch.from_numpy(img).float()
         if gray:
             tensor = tensor.unsqueeze(-1)
@@ -102,6 +110,14 @@ class MyH5Entity(Entity):
                 disparity = frame["disparity/bpnet"][:] + (
                     self.shift if self.shift is not None else 0
                 )
+
+            elif self.bpnet_gt:
+                disparity = frame["disparity/bpnet"][:]
+                disparity[disparity < 12] = 10000
+                disparity = disparity + (self.shift if self.shift is not None else 0)
+                mask = frame["disparity/bpnet_occ_map"][:]
+                disparity[np.isinf(disparity)] = 10000
+                disparity[np.isnan(disparity)] = 10000
             else:
                 disparity = np.zeros((540, 720), np.float32) - 1
             # disparity = refine_disparity_with_monodepth(disparity, monodepth_nir)
@@ -124,6 +140,7 @@ class MyH5Entity(Entity):
             # disparity = combine_disparity_by_edge(
             #     lidar_projected_points, disparity_rgb, disparity_nir, rgb_left, nir_left
             # )
+            disparity = img_pad_np(disparity)
             disparity = torch.from_numpy(disparity).unsqueeze(-1).permute(2, 0, 1)
 
         lidar_projected_points = torch.from_numpy(lidar_projected_points).float()
@@ -135,7 +152,6 @@ class MyH5Entity(Entity):
         rgb_right = self.imread(os.path.join(frame_path, "rgb", "right.png"))
         nir_left = self.imread(os.path.join(frame_path, "nir", "left.png"), gray=True)
         nir_right = self.imread(os.path.join(frame_path, "nir", "right.png"), gray=True)
-
         if self.shift is not None:
             rgb_right = torch.roll(rgb_right, shifts=-self.shift, dims=-1)
             nir_right = torch.roll(nir_right, shifts=-self.shift, dims=-1)
@@ -162,20 +178,15 @@ class MyRefinedH5DataSet(EntityDataSet):
             for frame_id in frame_ids:
                 frame = f.require_group(f"frame/{frame_id}")
                 if "disparity" in frame:
-                    for _ in range(10):
-                        frame_id_ret.append(
-                            MyH5Entity(
-                                h5_file,
-                                os.path.join(os.path.dirname(h5_file), frame_id),
-                                (
-                                    random.randint(0, 36)
-                                    if self.use_right_shift
-                                    else None
-                                ),
-                                is_refined_gt=True,
-                            )
+                    frame_id_ret.append(
+                        MyH5Entity(
+                            h5_file,
+                            os.path.join(os.path.dirname(h5_file), frame_id),
+                            (random.randint(0, 36) if self.use_right_shift else None),
+                            is_refined_gt=True,
                         )
-        self.input_list = random.sample(frame_id_ret, len(frame_id_ret))
+                    )
+        self.input_list = frame_id_ret
 
 
 class MyH5DataSet(EntityDataSet):
@@ -186,13 +197,25 @@ class MyH5DataSet(EntityDataSet):
         frame_cache=False,
         update_cache=False,
         use_right_shift=False,
+        scene_list: List[str] = None,
+        bpnet_gt=False,
     ):
         self.transform_mtx = np.load("jai_transform.npy")
         self.frame_cache = frame_cache
         self.update_cache = update_cache
         self.use_right_shift = use_right_shift
         ## find h5 files
-        h5files = self.find_h5_files(root)
+        self.bpnet_gt = bpnet_gt
+        if scene_list is not None:
+            scene_list = [os.path.join("/bean/depth", x) for x in scene_list]
+            h5files = [
+                os.path.join(x, y)
+                for x in scene_list
+                for y in os.listdir(x)
+                if y.endswith(".hdf5")
+            ]
+        else:
+            h5files = self.find_h5_files(root)
         h5files.sort()
         ## read h5 files and get frame_id list
         frame_id_list: List[MyH5Entity] = []
@@ -245,16 +268,31 @@ class MyH5DataSet(EntityDataSet):
                 frame = f.require_group(f"frame/{frame_id}")
                 if "disparity" in frame:
                     if "align_error" in frame.attrs and frame.attrs["align_error"]:
+
                         continue
                     if (
                         "exposure_error" in frame.attrs
                         and frame.attrs["exposure_error"]
                     ):
+
                         continue
-                    if (
-                        "lidar_align_error" in frame.attrs
-                        and frame.attrs["lidar_align_error"]
-                    ):
+                    # if (
+                    #     "lidar_align_error" in frame.attrs
+                    #     and frame.attrs["lidar_align_error"]
+                    # ):
+                    #     print("lidar align error")
+                    #     continue
+                    if self.bpnet_gt:
+                        if not "disparity/bpnet_occ_map" in frame:
+
+                            continue
+                        frame_id_ret.append(
+                            MyH5Entity(
+                                h5_file,
+                                os.path.join(os.path.dirname(h5_file), frame_id),
+                                bpnet_gt=True,
+                            )
+                        )
                         continue
                     frame_id_ret.append(
                         MyH5Entity(
