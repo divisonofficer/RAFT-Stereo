@@ -12,9 +12,9 @@ from hsvfusion.utils import HSVRGB, RGBHSV, GuidedFilter
 
 class HSVNet(torch.nn.Module):
 
-    def __init__(self, args):
+    def __init__(self, args, init_raft_stereo = False):
         super(HSVNet, self).__init__()
-
+        self.args = args
         self.encoder = BasicEncoder(downsample=2, output_dim=256)
         self.fusion = AttentionFeatureFusion(in_channels=256, reduction=4)
         self.channel_reduction = nn.Sequential(
@@ -23,18 +23,32 @@ class HSVNet(torch.nn.Module):
             nn.Conv2d(64, 2, 3, padding=1),
             nn.ReLU(),
         )
-
-        self.raft_stereo = RAFTStereo(args)
+        if init_raft_stereo:
+            self.raft_stereo = RAFTStereo(args)
         self.hsv2rgb = HSVRGB()
         self.rgb2hsv = RGBHSV()
         self.gf = GuidedFilter()
         self.padder = None
 
+        if args.hsv_activation:
+            self.activation = nn.Sequential(
+                ResidualBlock(3, 128),
+                ResidualBlock(128, 64),
+                nn.Conv2d(64, 3, 3, padding=1),
+                nn.ReLU(),
+            )
+
+
     def forward(
-        self, v: torch.Tensor, n: torch.Tensor, raft_stereo=True, att_out=False
+        self, v: list[torch.Tensor], n: list[torch.Tensor], raft_stereo=True, att_out=False
     ):
 
-        _, _, H, W = v.size()
+        islist = isinstance(v, list)
+        if islist:
+            v = torch.cat(v, dim=0)
+            n = torch.cat(n, dim=0)
+        B, _, H, W = v.size()
+        print(v.shape, n.shape)
         if self.padder is None:
             self.padder = InputPadder(v.size(), divis_by=32)
 
@@ -60,13 +74,17 @@ class HSVNet(torch.nn.Module):
             )
         )
         # rgb = self.gf(n, rgb, radius=5) * 255
-        rgb = rgb[..., :H, :W]
+
+        if self.args.hsv_activation:
+            rgb = self.activation(rgb)
+
+        rgb = torch.clip(rgb[..., :H, :W], 0, 255)
         if raft_stereo:
-            rgb_left, rgb_right = torch.split(rgb, W // 2, dim=-1)
+            rgb_left, rgb_right = torch.split(rgb, B // 2, dim=0)
             flow = self.raft_stereo(rgb_left, rgb_right, iters=5)
             return rgb, flow
         if att_out:
-            return self.fusion(hsv_fmap, nir_fmap, debug_attention=True)
+            return rgb, [hsv[:,:1], hsv[:,1:2], hsv[:,2:3], w]
         return rgb
 
     def freeze_bn(self):

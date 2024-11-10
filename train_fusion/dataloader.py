@@ -42,6 +42,7 @@ class Entity:
         raise NotImplementedError("You must implement get_item method")
 
 
+
 class EntityFlying3d(Entity):
 
     cut_resolution = (540, 720)
@@ -216,6 +217,66 @@ class EntityDataSet(data.Dataset):
 
     def __len__(self):
         return len(self.input_list)
+
+
+
+
+class EntityMiddlebury(Entity):
+    def __init__(self, disparity: str, left: str, right: str):
+        self.disparity = disparity
+        self.left = left
+        self.right = right
+
+
+    def get_item(self) -> Tuple[torch.Tensor]:
+
+        x = random.randint(0, 800)
+        y = random.randint(0,200)
+
+        left = cv2.imread(self.left)[y:y+540, x:x+720].astype(np.float32)
+        right = cv2.imread(self.right)[y:y+540, x:x+720].astype(np.float32)
+        left_nir = pseudo_nir_np(left.copy()).astype(np.float32)
+        right_nir = pseudo_nir_np(right.copy()).astype(np.float32)
+        left_rgb = torch.from_numpy(img_pad_np(left)).permute(2, 0, 1)
+        right_rgb = torch.from_numpy(img_pad_np(right)).permute(2, 0, 1)
+        left_nir = torch.from_numpy(img_pad_np(left_nir)).unsqueeze(0)
+        right_nir = torch.from_numpy(img_pad_np(right_nir)).unsqueeze(0)
+        left_rgb_original = left_rgb.clone()
+        right_rgb_original = right_rgb.clone()
+        disparity_left = pfmread.read(self.disparity).copy()[y:y+540, x:x+720]
+        disparity_left[np.isinf(disparity_left)] = 100000
+        disparity_left[np.isnan(disparity_left)] = 100000
+        disparity_left = img_pad_np(disparity_left, pad_constant=True)
+        disparity_left = torch.from_numpy(disparity_left).unsqueeze(0)
+
+        nsmt = random.randint(1, 100)
+        if nsmt > 70:
+            left_rgb = apply_patch_gamma_correction_torch(left_rgb.unsqueeze(0))[0]
+            right_rgb = apply_patch_gamma_correction_torch(right_rgb.unsqueeze(0))[0]
+        elif nsmt > 20:
+            left_rgb = torch.clip(left_rgb - random.randint(64,224), 0, 255)
+            right_rgb = torch.clip(right_rgb - random.randint(64,224), 0, 255)
+        else:
+            left_nir = apply_patch_gamma_correction_torch(left_nir.unsqueeze(0))[0]
+            right_nir = apply_patch_gamma_correction_torch(right_nir.unsqueeze(0))[0]
+        return left_rgb, right_rgb, left_nir, right_nir, left_rgb_original, right_rgb_original, disparity_left, disparity_left, 
+
+class MiddleburyDataset(EntityDataSet):
+    input_list: List[Entity]
+
+    def __init__(self, folder: str = "data/middlebury"):
+        self.input_list = []
+        for root, _, files in os.walk(folder):
+            for file in files:
+                if file.endswith("disp0.pfm"):
+                    for i in range(100):
+                        self.input_list.append(
+                            EntityMiddlebury(
+                                os.path.join(root, file),
+                                os.path.join(root, file.replace("disp0", "im0").replace("pfm", "png")),
+                                os.path.join(root, file.replace("disp0", "im1").replace("pfm", "png")),
+                            )
+                        )
 
 
 class StereoDatasetArgs:

@@ -35,7 +35,7 @@ from train_fusion.loss_function import (
     disparity_smoothness,
 )
 from train_fusion.my_h5_dataloader import MyH5DataSet, MyRefinedH5DataSet
-from train_fusion.dataloader import EntityDataSet, StereoDataset, StereoDatasetArgs
+from train_fusion.dataloader import EntityDataSet, StereoDataset, StereoDatasetArgs, MiddleburyDataset
 import matplotlib.pyplot as plt
 from torch.nn.parallel import DataParallel
 from collections import OrderedDict
@@ -47,18 +47,19 @@ class RaftTrainer(DDPTrainer):
 
         args = FusionArgs()
         # args.restore_ckpt = "models/raftstereo-eth3d.pth"
-        args.restore_ckpt = "checkpoints/latest_HSVFusionResReal.pth"
-        args.shared_backbone = True
-        args.n_gru_layers = 2
-        args.n_downsample = 3
-        args.batch_size = 6
+        args.restore_ckpt = "checkpoints/latest_HSVFusionResMid.pth"
+        args.shared_backbone = False
+        args.n_gru_layers = 3
+        args.n_downsample = 2
+        args.batch_size = 1
         args.valid_steps = 100
         args.lr = 0.00001
-        args.real_input_only = True
+        args.real_input_only = False
         # args.corr_implementation = "reg"
         args.log_dir = "runs_hsv"
-        args.name = "HSVFusionResReal"
+        args.name = "HSVFusionResMid"
         args.shared_fusion = True
+        args.hsv_activation = False
         args.mixed_precision = True
         args.freeze_backbone = ["Extractor", "Updater", "Volume", "BatchNorm"]
         self.args = args
@@ -67,7 +68,7 @@ class RaftTrainer(DDPTrainer):
     def init_models(self) -> Module:
         # raft_model = RAFTStereo(self.args).to(self.device)
 
-        model = HSVNet(self.args).to(self.device)
+        model = HSVNet(self.args, init_raft_stereo=True).to(self.device)
         model = DDP(
             model,
             device_ids=[self.local_rank],
@@ -80,12 +81,15 @@ class RaftTrainer(DDPTrainer):
             self.total_steps = w_dict["total_steps"]
             w_dict = w_dict["model_state_dict"]
 
-        model.module.load_state_dict(w_dict, strict=True)
-        print(model.module.encoder.conv1.state_dict()["weight"][0])
-        checkpoint = torch.load("models/raftstereo-realtime.pth")
+        #model.module.load_state_dict(w_dict, strict=True)
+        #print(model.module.encoder.conv1.state_dict()["weight"][0])
+        checkpoint = torch.load("models/raftstereo-middlebury.pth")
 
         # 새로운 state_dict 생성
-        new_state_dict = OrderedDict()
+        #new_state_dict = OrderedDict()
+        for key in list(w_dict.keys()):
+            if "raft_stereo." in key:
+                del w_dict[key]
 
         for key, value in checkpoint.items():
             if key.startswith("module."):
@@ -93,10 +97,10 @@ class RaftTrainer(DDPTrainer):
                 new_key = key[7:]
             else:
                 new_key = key
-            new_state_dict[new_key] = value
+            w_dict[f"raft_stereo.{new_key}"] = value
 
         # 수정된 state_dict 로드
-        model.module.raft_stereo.load_state_dict(new_state_dict, strict=True)
+        model.module.load_state_dict(w_dict, strict=False)
         model.module.raft_stereo.eval()
         model.module.encoder.eval()
         for name, param in model.module.raft_stereo.named_parameters():
@@ -119,55 +123,56 @@ class RaftTrainer(DDPTrainer):
     def init_dataloader(
         self,
     ) -> Tuple[DistributedSampler, DistributedSampler, DataLoader, DataLoader]:
-        dataset = MyH5DataSet(
-            frame_cache=False,
-            use_right_shift=False,
-            bpnet_gt=True,
-            scene_list=[
-                "10-08-10-39-20",
-                # "09-08-17-27-33",
-                # "09-28-17-34-59",
-                # "09-28-21-15-50",
-                "10-08-10-26-23",
-                "10-08-10-34-37",
-                "10-06-18-27-51",
-                "10-01-16-20-28",
-                "10-01-16-03-50",
-                "09-09-20-04-34",
-                # "09-09-19-46-45",
-                # "09-20-13-50-44",
-            ],
-        )
-        # dataset_refined = MyRefinedH5DataSet(use_right_shift=True)
-        dataset_flying = StereoDataset(
-            StereoDatasetArgs(
-                flying3d_json=True,
-                shift_filter=True,
-                noised_input=False,
-                rgb_rendered=True,
-                rgb_gt=False,
-                fast_test=True,
-            )
-        )
+        # dataset = MyH5DataSet(
+        #     frame_cache=False,
+        #     use_right_shift=False,
+        #     bpnet_gt=True,
+        #     scene_list=[
+        #         "10-08-10-39-20",
+        #         # "09-08-17-27-33",
+        #         # "09-28-17-34-59",
+        #         # "09-28-21-15-50",
+        #         "10-08-10-26-23",
+        #         "10-08-10-34-37",
+        #         "10-06-18-27-51",
+        #         "10-01-16-20-28",
+        #         "10-01-16-03-50",
+        #         "09-09-20-04-34",
+        #         # "09-09-19-46-45",
+        #         # "09-20-13-50-44",
+        #     ],
+        # )
+        # # dataset_refined = MyRefinedH5DataSet(use_right_shift=True)
+        # dataset_flying = StereoDataset(
+        #     StereoDatasetArgs(
+        #         flying3d_json=True,
+        #         shift_filter=True,
+        #         noised_input=False,
+        #         rgb_rendered=True,
+        #         rgb_gt=False,
+        #         fast_test=True,
+        #     )
+        # )
 
-        dataset_drive = StereoDataset(
-            StereoDatasetArgs(
-                flow3d_driving_json=True,
-                shift_filter=True,
-                noised_input=False,
-                rgb_rendered=True,
-                rgb_gt=False,
-                fast_test=True,
-            )
-        )
+        # dataset_drive = StereoDataset(
+        #     StereoDatasetArgs(
+        #         flow3d_driving_json=True,
+        #         shift_filter=True,
+        #         noised_input=False,
+        #         rgb_rendered=True,
+        #         rgb_gt=False,
+        #         fast_test=True,
+        #     )
+        # )
 
-        dataset_train = EntityDataSet(
-            dataset_flying.input_list[:10000]
-            + dataset_drive.input_list[:20000]
-            + dataset.input_list[50:]
-        )
-        dataset_valid = EntityDataSet(input_list=dataset.input_list[:50])
-        print(len(dataset_valid))
+        # dataset_train = EntityDataSet(
+        #     dataset_flying.input_list[:10000]
+        #     + dataset_drive.input_list[:20000]
+        #     + dataset.input_list[50:]
+        # )
+        # dataset_valid = EntityDataSet(input_list=dataset.input_list[:50])
+        dataset_train = MiddleburyDataset()
+        dataset_valid = EntityDataSet(dataset_train.input_list[:30])
         train_sampler = DistributedSampler(dataset_train)
         valid_sampler = DistributedSampler(dataset_valid)
         return (
@@ -197,16 +202,14 @@ class RaftTrainer(DDPTrainer):
         if image.shape[0] < 100:
             image = image.permute(1, 2, 0).numpy()
         if cmap is not None:
-            ax.imshow(image, cmap=cmap, vmin=0, vmax=64)
+            ax.imshow(image, cmap=cmap, vmin=0, vmax=128)
         else:
             ax.imshow(image.astype(np.uint8))
         return fig
 
     def log_figures(self, idx: int, batch: List[torch.Tensor]):
-        rgb = torch.concat([batch[0], batch[1]], dim=3)
-        nir = torch.concat([batch[2], batch[3]], dim=3)
         with torch.no_grad():
-            fusion, flow = self.model(rgb, nir)
+            fusion, flow = self.model([batch[0], batch[1]],[batch[2], batch[3]])
             flow_rgb = self.model.module.raft_stereo(
                 batch[0].cuda(), batch[1].cuda(), test_mode=True
             )[1]
@@ -231,13 +234,13 @@ class RaftTrainer(DDPTrainer):
             idx,
         )
         self.logger.add_figure(
-            val_head + "disparity_rgb",
+            val_head + "disparity_nir",
             self.create_image_figure(-flow_nir[0, 0].cpu().numpy(), "magma"),
             idx,
         )
 
-        self.logger.add_figure(val_head + "rgb", self.create_image_figure(rgb), idx)
-        self.logger.add_figure(val_head + "nir", self.create_image_figure(nir), idx)
+        self.logger.add_figure(val_head + "rgb", self.create_image_figure(torch.concat(batch[:2], dim= -2)), idx)
+        self.logger.add_figure(val_head + "nir", self.create_image_figure(torch.concat(batch[2:4], dim= -2)), idx)
         self.logger.add_figure(
             val_head + "fusion", self.create_image_figure(fusion), idx
         )
@@ -284,12 +287,10 @@ class RaftTrainer(DDPTrainer):
         target_gt = inputs[-2]
         disp_gt = inputs[-1]
 
-        rgb = torch.concat([inputs[0], inputs[1]], dim=3)
-        nir = torch.concat([inputs[2], inputs[3]], dim=3)
-        fusion, flow = self.model(rgb, nir, raft_stereo=True)
-
+        fusion, flow = self.model([inputs[0], inputs[1]], [inputs[2], inputs[3]], raft_stereo=True)
+        fusion = torch.split(fusion, fusion.shape[0] //2, dim=0)
         loss, metrics = self.loss_fn(
-            torch.split(fusion, fusion.shape[-1] // 2, -1),
+            fusion,
             flow,
             inputs[4:6],
             disp_gt,
@@ -306,9 +307,7 @@ class RaftTrainer(DDPTrainer):
                 inputs = [x.to(self.device) for x in input_valid]
                 target_gt = inputs[-2]
                 disp_gt = inputs[-1]
-                rgb = torch.concat([inputs[0], inputs[1]], dim=3)
-                nir = torch.concat([inputs[2], inputs[3]], dim=3)
-                fusion, flow = self.model(rgb, nir)
+                fusion, flow = self.model([inputs[0], inputs[1]], [inputs[2], inputs[3]], raft_stereo=True)
                 loss, metric = self.loss_fn_gt(flow, disp_gt)
                 for k, v in metric.items():
                     k = f"valid_{k}"
