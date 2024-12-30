@@ -96,8 +96,7 @@ def read_image_pair(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     ret = []
     for path in ["rgb/left.png", "rgb/right.png", "nir/left.png", "nir/right.png"]:
-
-        if not os.path.exists(f"{frame_path}/{path}"):
+        if os.path.exists(f'{frame_path}/{path.replace(".png", "_distorted.png")}'):
             path = path.replace(".png", "_distorted.png")
         img = cv2.imread(
             f"{frame_path}/{path}",

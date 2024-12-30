@@ -1,14 +1,13 @@
 from typing import Callable, Optional, Tuple, Union
 import numpy as np
 import torch
-import cv2
-from myutils.image_process import disparity_image_edge, disparity_image_edge_eval
-from myutils.matrix import rmse_loss, mae_loss
+from myutils.image_process import disparity_image_edge
+from myutils.matrix import rmse_loss
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter
 
 
-def transfrom_points(points: np.ndarray, transform_mtx: np.ndarray):
+def transform_points(points: np.ndarray, transform_mtx: np.ndarray):
     """
     Transform points using a 4x4 transformation matrix
     Args:
@@ -18,7 +17,6 @@ def transfrom_points(points: np.ndarray, transform_mtx: np.ndarray):
         np.ndarray: Transformed points
     """
     points = points.reshape(-1, 3)
-    points = points[(points[:, 0] != 0) | (points[:, 1] != 0)]
     points = np.concatenate([points, np.ones((points.shape[0], 1))], axis=1)
     points = transform_mtx @ points.T
     return points[:3].T
@@ -34,7 +32,7 @@ def transform_point_inverse(points: np.ndarray, transform_mtx: np.ndarray):
         np.ndarray: Transformed points
     """
     transform_mtx = np.linalg.pinv(transform_mtx)
-    return transfrom_points(points, transform_mtx)
+    return transform_points(points, transform_mtx)
 
 
 def lidar_points_to_disparity_with_cal(

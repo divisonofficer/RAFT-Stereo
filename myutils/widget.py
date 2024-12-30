@@ -73,7 +73,7 @@ class FrameExplorer:
 
     def get_frame_image(self, frame_path: str, src="rgb", side="left"):
         img_path = os.path.join(frame_path, src, f"{side}.png")
-        if not os.path.exists(img_path):
+        if os.path.exists(img_path.replace(".png", "_distorted.png")):
             img_path = img_path.replace(".png", "_distorted.png")
         return cv2.imread(img_path)
 
